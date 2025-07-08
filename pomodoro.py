@@ -241,10 +241,17 @@ def main():
     activity_thread.start()
 
     last_save_time = time.time()
+    last_loop_time = time.time()  # Track when we last ran the loop
 
     try:
         while True:
             current_loop_time = time.time()
+            time_since_last_loop = current_loop_time - last_loop_time
+            
+            # If we've been sleeping for more than 5 seconds, we likely woke from sleep
+            if time_since_last_loop > 5:
+                print(f"\nResumed after {time_since_last_loop:.1f} seconds (likely from sleep)")
+            
             today_str = datetime.now().strftime('%Y-%m-%d') # Get current date string
             state["elapsed_since_last_activity"] = current_loop_time - last_activity_time
             IDLE_THRESHOLD_SECONDS = 30
@@ -253,32 +260,50 @@ def main():
             increment_today_work = False
             if state["current_mode"] == "work":
                 if state["is_active"]:
-                    state["remaining_time"] -= 1
+                    state["remaining_time"] -= time_since_last_loop
                     increment_today_work = True
                 else:
-                    state["remaining_time"] += work_idle_count_up_rate
+                    state["remaining_time"] += work_idle_count_up_rate * time_since_last_loop
                     state["remaining_time"] = min(state["remaining_time"], max_idle_cap)
             elif state["current_mode"] == "break":
                 if state["is_active"]:
-                    state["remaining_time"] += break_active_count_up_rate
+                    state["remaining_time"] += break_active_count_up_rate * time_since_last_loop
                     increment_today_work = True # Active breaks still count towards daily total
                 else:
-                    state["remaining_time"] -= 1
+                    state["remaining_time"] -= time_since_last_loop
             
             if increment_today_work:
                 current_day_total = state["daily_work_totals"].get(today_str, 0)
-                state["daily_work_totals"][today_str] = current_day_total + 1
+                state["daily_work_totals"][today_str] = current_day_total + time_since_last_loop
 
             if state["remaining_time"] <= 0:
                 print(" " * 120, end='\r') 
+                
+                # Calculate how much time went negative
+                negative_time = abs(state["remaining_time"])
+                
                 if state["current_mode"] == "work":
                     state["current_mode"] = "break"
                     state["remaining_time"] = float(break_time_seconds)
                     print(f"\nStarting break ({args.break_time} minutes)...")
+                    
+                    # If we went negative, add extra work time that should have been added
+                    if negative_time > 0:
+                        extra_work_time = negative_time * work_idle_count_up_rate
+                        state["remaining_time"] += extra_work_time
+                        state["remaining_time"] = min(state["remaining_time"], max_idle_cap)
+                        print(f"Adjusted for {negative_time:.1f}s of extra work time during sleep")
+                        
                 elif state["current_mode"] == "break": 
                     state["current_mode"] = "work"
                     state["remaining_time"] = float(work_time_seconds)
                     print(f"\nStarting work ({args.work_time} minutes)...")
+                    
+                    # If we went negative, subtract extra break time that should have been added
+                    if negative_time > 0:
+                        extra_break_time = negative_time * break_active_count_up_rate
+                        state["remaining_time"] -= extra_break_time
+                        print(f"Adjusted for {negative_time:.1f}s of extra break time during sleep")
             
             output(state, args)
 
@@ -286,6 +311,7 @@ def main():
                 save_state_to_file(state)
                 last_save_time = current_loop_time
 
+            last_loop_time = current_loop_time
             time.sleep(1)
 
     except KeyboardInterrupt:
