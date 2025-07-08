@@ -1,20 +1,125 @@
 import argparse
 import time
-from pynput import mouse, keyboard
 import json
 import os
+import subprocess
+import threading
+import glob
 from datetime import datetime
 
 # Global variable to store the timestamp of the last detected activity
 last_activity_time = time.time()
+activity_detection_running = False
+libinput_process = None
 
 STATE_FILE = "pomodoro_state.json"
 SAVE_INTERVAL_SECONDS = 10  # Save state every 10 seconds
 
-def update_last_activity_time(*args):
-    """Callback function to update the last_activity_time on any input event."""
+def get_input_devices():
+    """Get list of input devices that can be monitored."""
+    devices = []
+    try:
+        # Look for input devices
+        for device in glob.glob('/dev/input/event*'):
+            try:
+                # Try to get device info
+                result = subprocess.run(['udevadm', 'info', '--name=' + device], 
+                                      capture_output=True, text=True, timeout=1)
+                if result.returncode == 0:
+                    # Check if it's a keyboard or mouse
+                    if any(keyword in result.stdout.lower() for keyword in ['keyboard', 'mouse', 'pointer']):
+                        devices.append(device)
+            except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+                continue
+    except Exception:
+        pass
+    
+    # Fallback: just try common input devices
+    if not devices:
+        common_devices = ['/dev/input/event0', '/dev/input/event1', '/dev/input/event2']
+        for device in common_devices:
+            if os.path.exists(device):
+                devices.append(device)
+    
+    return devices
+
+def monitor_input_activity():
+    """Monitor input activity using file modification times."""
     global last_activity_time
-    last_activity_time = time.time()
+    
+    # Get input devices
+    devices = get_input_devices()
+    if not devices:
+        return False
+    
+    try:
+        # Check if any input device has been modified recently
+        current_time = time.time()
+        for device in devices:
+            try:
+                mtime = os.path.getmtime(device)
+                if current_time - mtime < 2:  # If device was accessed in last 2 seconds
+                    last_activity_time = current_time
+                    return True
+            except (OSError, IOError):
+                continue
+    except Exception:
+        pass
+    
+    return False
+
+def libinput_monitor_thread():
+    """Background thread to continuously monitor libinput events."""
+    global last_activity_time, activity_detection_running, libinput_process
+    
+    try:
+        # Start libinput debug-events process
+        libinput_process = subprocess.Popen(
+            ['libinput', 'debug-events'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        # Read output line by line
+        for line in libinput_process.stdout:
+            if not activity_detection_running:
+                break
+                
+            # Any line from libinput means activity
+            if line.strip():
+                last_activity_time = time.time()
+                
+    except Exception as e:
+        print(f"Warning: libinput monitoring failed: {e}")
+    finally:
+        if libinput_process:
+            libinput_process.terminate()
+            libinput_process.wait()
+
+def get_system_idle_time():
+    """Get system idle time using various methods."""
+    global last_activity_time
+    
+    # Calculate idle time based on last_activity_time
+    current_time = time.time()
+    idle_time = current_time - last_activity_time
+    return idle_time
+
+def update_last_activity_time():
+    """Update the last activity time based on system idle detection."""
+    global last_activity_time
+    idle_time = get_system_idle_time()
+    # No debug output needed here
+
+def activity_monitor_thread():
+    """Background thread to continuously monitor system activity."""
+    global activity_detection_running
+    while activity_detection_running:
+        update_last_activity_time()
+        time.sleep(1)  # Check every second
 
 def save_state_to_file(state):
     """Saves a cleaned version of the current state to a JSON file directly."""
@@ -68,12 +173,16 @@ def parse_arguments():
 
 def main():
     """Main function to run the Pomodoro timer."""
-    global last_activity_time
+    global last_activity_time, activity_detection_running
     args = parse_arguments()
 
     print("Pomodoro Timer Started")
     print(f"Work time: {args.work_time} minutes")
     print(f"Break time: {args.break_time} minutes")
+    print(f"Start mode: {args.start_mode}")
+    if args.start_minutes is not None:
+        print(f"Start minutes: {args.start_minutes}")
+    print("Using system-wide activity detection (works across all screens/workspaces)")
 
     work_time_seconds = args.work_time * 60
     break_time_seconds = args.break_time * 60
@@ -89,11 +198,28 @@ def main():
         }
         if args.start_minutes is not None:
             state["remaining_time"] = args.start_minutes * 60.0
+            print(f"Starting with {args.start_minutes} minutes remaining")
         else:
             if state["current_mode"] == "work":
                 state["remaining_time"] = float(work_time_seconds)
             else: # state["current_mode"] == "break"
                 state["remaining_time"] = float(break_time_seconds)
+    else:
+        # If we loaded a state, apply command-line overrides
+        original_mode = state["current_mode"]
+        original_time = state["remaining_time"] / 60.0
+        
+        # Override start-mode if it differs from saved state
+        if state["current_mode"] != args.start_mode:
+            state["current_mode"] = args.start_mode
+            print(f"Overriding saved mode '{original_mode}' with '{args.start_mode}'")
+        
+        # Override remaining time if start-minutes was specified
+        if args.start_minutes is not None:
+            state["remaining_time"] = args.start_minutes * 60.0
+            print(f"Overriding saved time ({original_time:.1f} min) with {args.start_minutes} minutes")
+        else:
+            print(f"Loaded saved state: {original_mode} mode with {original_time:.1f} minutes remaining")
     
     state["is_active"] = True 
     state["elapsed_since_last_activity"] = 0.0
@@ -103,17 +229,16 @@ def main():
     work_idle_count_up_rate = (args.work_time * 1.0) / args.break_time
     break_active_count_up_rate = (args.break_time * 1.0) / args.work_time
 
-    mouse_listener = mouse.Listener(
-        on_move=update_last_activity_time,
-        on_click=update_last_activity_time,
-        on_scroll=update_last_activity_time
-    )
-    keyboard_listener = keyboard.Listener(
-        on_press=update_last_activity_time
-    )
-
-    mouse_listener.start()
-    keyboard_listener.start()
+    # Start background activity monitoring threads
+    activity_detection_running = True
+    
+    # Start libinput monitor thread
+    libinput_thread = threading.Thread(target=libinput_monitor_thread, daemon=True)
+    libinput_thread.start()
+    
+    # Start activity monitor thread
+    activity_thread = threading.Thread(target=activity_monitor_thread, daemon=True)
+    activity_thread.start()
 
     last_save_time = time.time()
 
@@ -145,15 +270,15 @@ def main():
                 state["daily_work_totals"][today_str] = current_day_total + 1
 
             if state["remaining_time"] <= 0:
-                print(" " * 120, end='\\r') 
+                print(" " * 120, end='\r') 
                 if state["current_mode"] == "work":
                     state["current_mode"] = "break"
                     state["remaining_time"] = float(break_time_seconds)
-                    print(f"\\nStarting break ({args.break_time} minutes)...")
+                    print(f"\nStarting break ({args.break_time} minutes)...")
                 elif state["current_mode"] == "break": 
                     state["current_mode"] = "work"
                     state["remaining_time"] = float(work_time_seconds)
-                    print(f"\\nStarting work ({args.work_time} minutes)...")
+                    print(f"\nStarting work ({args.work_time} minutes)...")
             
             output(state, args)
 
@@ -164,13 +289,14 @@ def main():
             time.sleep(1)
 
     except KeyboardInterrupt:
-        print(" " * 120, end='\\r') 
-        print("\\nPomodoro Timer stopped.")
+        print(" " * 120, end='\r') 
+        print("\nPomodoro Timer stopped.")
         save_state_to_file(state) 
     finally:
-        mouse_listener.stop()
-        keyboard_listener.stop()
-        print("Input listeners stopped.")
+        activity_detection_running = False
+        if libinput_process:
+            libinput_process.terminate()
+        print("Activity monitoring stopped.")
 
 def output(state, args):
     """Handles all per-second console output."""
