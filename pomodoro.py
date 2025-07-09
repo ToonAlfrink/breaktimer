@@ -283,27 +283,27 @@ def main():
                 negative_time = abs(state["remaining_time"])
                 
                 if state["current_mode"] == "work":
-                    state["current_mode"] = "break"
-                    state["remaining_time"] = float(break_time_seconds)
-                    print(f"\nStarting break ({args.break_time} minutes)...")
-                    
-                    # If we went negative, add extra work time that should have been added
+                    # We're switching FROM work TO break, so apply work-mode corrections
                     if negative_time > 0:
                         extra_work_time = negative_time * work_idle_count_up_rate
                         state["remaining_time"] += extra_work_time
                         state["remaining_time"] = min(state["remaining_time"], max_idle_cap)
                         print(f"Adjusted for {negative_time:.1f}s of extra work time during sleep")
+                    
+                    state["current_mode"] = "break"
+                    state["remaining_time"] = float(break_time_seconds)
+                    print(f"\nStarting break ({args.break_time} minutes)...")
                         
                 elif state["current_mode"] == "break": 
-                    state["current_mode"] = "work"
-                    state["remaining_time"] = float(work_time_seconds)
-                    print(f"\nStarting work ({args.work_time} minutes)...")
-                    
-                    # If we went negative, subtract extra break time that should have been added
+                    # We're switching FROM break TO work, so apply break-mode corrections
                     if negative_time > 0:
                         extra_break_time = negative_time * break_active_count_up_rate
                         state["remaining_time"] -= extra_break_time
                         print(f"Adjusted for {negative_time:.1f}s of extra break time during sleep")
+                    
+                    state["current_mode"] = "work"
+                    state["remaining_time"] = float(work_time_seconds)
+                    print(f"\nStarting work ({args.work_time} minutes)...")
             
             output(state, args)
 
@@ -332,23 +332,29 @@ def output(state, args):
     today_str = datetime.now().strftime('%Y-%m-%d')
     total_work_val = state["daily_work_totals"][today_str]
     
-
-    display_time_str = time.strftime('%M:%S', time.gmtime(int(max(0, remaining_time_val))))
+    # Format time display - show MM:SS but allow minutes to go over 60
+    remaining_seconds = int(max(0, remaining_time_val))
+    remaining_minutes = remaining_seconds // 60
+    remaining_secs = remaining_seconds % 60
+    display_time_str = f"{remaining_minutes}:{remaining_secs:02d}"
     
     elapsed_minutes, elapsed_seconds = divmod(int(elapsed_activity_val), 60)
-    activity_info = f"Last Activity: {elapsed_minutes:02d}:{elapsed_seconds:02d}"
+    activity_info = f"{elapsed_minutes:02d}:{elapsed_seconds:02d} Last Activity"
 
     hours, remainder = divmod(max(0,total_work_val), 3600)
     minutes, _ = divmod(remainder, 60)
-    total_work_time_str = f"{int(hours):02d}:{int(minutes):02d}"
+    total_work_time_str = f"{int(hours):02d}:{int(minutes):02d} Total Work Today"
     
     activity_status = "Active" if state.get("is_active", True) else "Idle"
+    mode_info = f"{display_status_text}"
+    status_info = f"{activity_status}"
 
     output_str = (
-        f"Mode: {display_status_text} ({activity_status})\n"
-        f"Time Left: {display_time_str}\n"
+        f"\n\n\n{mode_info}\n"
+        f"{status_info}\n"
         f"{activity_info}\n"
-        f"Total Work Today: {total_work_time_str}"
+        f"{total_work_time_str}\n"
+        f"{display_time_str} Time Left"
     )
     print(output_str)
 
