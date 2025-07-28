@@ -159,9 +159,9 @@ def parse_arguments():
     parser.add_argument(
         "--start-mode",
         type=str,
-        default="work",
+        default=None,
         choices=["work", "break"],
-        help="Starting mode of the timer (default: work)."
+        help="Starting mode of the timer (default: work if no saved state, otherwise uses saved state)."
     )
     parser.add_argument(
         "--start-minutes",
@@ -179,7 +179,10 @@ def main():
     print("Pomodoro Timer Started")
     print(f"Work time: {args.work_time} minutes")
     print(f"Break time: {args.break_time} minutes")
-    print(f"Start mode: {args.start_mode}")
+    if args.start_mode is not None:
+        print(f"Start mode: {args.start_mode}")
+    else:
+        print("Start mode: resuming from saved state (or work if no saved state)")
     if args.start_minutes is not None:
         print(f"Start minutes: {args.start_minutes}")
     print("Using system-wide activity detection (works across all screens/workspaces)")
@@ -191,8 +194,10 @@ def main():
     state = load_state_from_file() # Attempt to load state
     if not state: # If loading failed or no state file
         print("No valid saved state found, starting fresh.")
+        # Use provided start_mode or default to "work"
+        start_mode = args.start_mode if args.start_mode is not None else "work"
         state = {
-            "current_mode": args.start_mode,
+            "current_mode": start_mode,
             "remaining_time": 0.0,
             "daily_work_totals": {}
         }
@@ -209,8 +214,8 @@ def main():
         original_mode = state["current_mode"]
         original_time = state["remaining_time"] / 60.0
         
-        # Override start-mode if it differs from saved state
-        if state["current_mode"] != args.start_mode:
+        # Override start-mode if it was explicitly provided and differs from saved state
+        if args.start_mode is not None and state["current_mode"] != args.start_mode:
             state["current_mode"] = args.start_mode
             print(f"Overriding saved mode '{original_mode}' with '{args.start_mode}'")
         
@@ -241,21 +246,25 @@ def main():
     activity_thread.start()
 
     last_save_time = time.time()
-    last_loop_time = time.time()  # Track when we last ran the loop
+    last_loop_time = time.time()
+    
+    # Activity detection threshold - used for both idle detection and sleep detection
+    ACTIVITY_THRESHOLD_SECONDS = 30
 
     try:
         while True:
             current_loop_time = time.time()
             time_since_last_loop = current_loop_time - last_loop_time
             
-            # If we've been sleeping for more than 5 seconds, we likely woke from sleep
-            if time_since_last_loop > 5:
-                print(f"\nResumed after {time_since_last_loop:.1f} seconds (likely from sleep)")
-            
             today_str = datetime.now().strftime('%Y-%m-%d') # Get current date string
             state["elapsed_since_last_activity"] = current_loop_time - last_activity_time
-            IDLE_THRESHOLD_SECONDS = 30
-            state["is_active"] = state["elapsed_since_last_activity"] <= IDLE_THRESHOLD_SECONDS
+            state["is_active"] = state["elapsed_since_last_activity"] <= ACTIVITY_THRESHOLD_SECONDS
+            
+            # If we've been sleeping for more than the activity threshold, we likely woke from sleep
+            # During sleep, the user was definitely idle, so force idle behavior
+            if time_since_last_loop > ACTIVITY_THRESHOLD_SECONDS:
+                print(f"\nResumed after {time_since_last_loop:.1f} seconds (likely from sleep)")
+                state["is_active"] = False
             
             increment_today_work = False
             if state["current_mode"] == "work":
@@ -330,7 +339,9 @@ def output(state, args):
     remaining_time_val = state.get("remaining_time", 0)
     elapsed_activity_val = state.get("elapsed_since_last_activity", 0)
     today_str = datetime.now().strftime('%Y-%m-%d')
-    total_work_val = state["daily_work_totals"][today_str]
+    
+    # Get today's work total, defaulting to 0 if not found
+    total_work_val = state["daily_work_totals"].get(today_str, 0)
     
     # Format time display - show MM:SS but allow minutes to go over 60
     remaining_seconds = int(max(0, remaining_time_val))
@@ -356,7 +367,7 @@ def output(state, args):
         f"{total_work_time_str}\n"
         f"{display_time_str} Time Left"
     )
-    print(output_str)
+    print(output_str, end='')
 
 if __name__ == "__main__":
     main() 
