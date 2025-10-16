@@ -5,7 +5,22 @@ import os
 import subprocess
 import threading
 import glob
+import sys
+import termios
+import tty
 from datetime import datetime
+
+# Hardcoded brightness values for work mode
+WORK_MODE_LAPTOP_BRIGHTNESS = 19  # Laptop brightness level for work mode
+WORK_MODE_EXTERNAL_BRIGHTNESS = 100  # External monitor brightness for work mode
+
+# Lock to protect shared state across threads
+state_lock = threading.Lock()
+# Flag to pause timer updates and periodic output while prompting
+prompt_active = False
+
+# Global rate needed to translate break-time remaining adjustments to work seconds
+GLOBAL_BREAK_ACTIVE_RATE = 1.0
 
 # Global variable to store the timestamp of the last detected activity
 last_activity_time = time.time()
@@ -121,6 +136,109 @@ def activity_monitor_thread():
         update_last_activity_time()
         time.sleep(1)  # Check every second
 
+def user_input_handler(state):
+    """Background thread to handle immediate '+'/'-' and prompt for minutes.
+
+    On '+' or '-' keypress (no Enter needed), pause timer/output, prompt for a
+    number of minutes, apply adjustment, then resume.
+    """
+    global prompt_active
+
+    stdin_fd = sys.stdin.fileno()
+    try:
+        old_settings = termios.tcgetattr(stdin_fd)
+    except termios.error:
+        old_settings = None
+
+    try:
+        # Enter cbreak mode to capture single keypresses immediately
+        if old_settings is not None:
+            tty.setcbreak(stdin_fd)
+
+        while True:
+            try:
+                ch = sys.stdin.read(1)
+            except (KeyboardInterrupt, EOFError):
+                break
+
+            if ch not in ('+', '-'):
+                continue
+
+            # Pause timer/output immediately
+            prompt_active = True
+            sign = 1.0 if ch == '+' else -1.0
+
+            # Build simple input line for minutes (digits and '.')
+            print("\n\nEnter number of minutes to adjust: ", end='', flush=True)
+            buffer = []
+            while True:
+                try:
+                    c = sys.stdin.read(1)
+                except (KeyboardInterrupt, EOFError):
+                    c = '\n'
+
+                if c in ('\n', '\r'):
+                    break
+                # Handle backspace (127) and Ctrl+H (8)
+                if c and ord(c) in (127, 8):
+                    if buffer:
+                        buffer.pop()
+                        # Erase one character visually
+                        print('\b \b', end='', flush=True)
+                    continue
+                # Accept digits and dot
+                if c.isdigit() or c == '.':
+                    buffer.append(c)
+                    print(c, end='', flush=True)
+                # Ignore everything else
+
+            amount_str = ''.join(buffer).strip()
+            print("")  # newline after prompt
+
+            if not amount_str:
+                print("Adjustment canceled.")
+                prompt_active = False
+                continue
+
+            try:
+                amount_minutes = float(amount_str)
+            except ValueError:
+                print("Invalid number. Adjustment canceled.")
+                prompt_active = False
+                continue
+
+            delta_seconds = sign * amount_minutes * 60.0
+            with state_lock:
+                previous_seconds = float(state.get("remaining_time", 0.0))
+                state["remaining_time"] = previous_seconds + delta_seconds
+                # Update today's work total based on manual adjustment
+                today_str = datetime.now().strftime('%Y-%m-%d')
+                current_total = state["daily_work_totals"].get(today_str, 0.0)
+                add_work_seconds = 0.0
+                if state.get("current_mode") == "work" and delta_seconds < 0:
+                    # Reducing work remaining counts as completed work
+                    add_work_seconds = -delta_seconds
+                elif state.get("current_mode") == "break" and delta_seconds > 0 and GLOBAL_BREAK_ACTIVE_RATE > 0:
+                    # Adding to break remaining implies active-break effort
+                    add_work_seconds = delta_seconds / GLOBAL_BREAK_ACTIVE_RATE
+                if add_work_seconds > 0:
+                    state["daily_work_totals"][today_str] = current_total + add_work_seconds
+
+            if delta_seconds >= 0:
+                print(f"Added {amount_minutes:g} minutes to the timer.")
+            else:
+                print(f"Subtracted {abs(amount_minutes):g} minutes from the timer.")
+
+            # Resume timer/output
+            prompt_active = False
+    finally:
+        # Restore terminal settings
+        if old_settings is not None:
+            try:
+                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_settings)
+            except termios.error:
+                pass
+
 def save_state_to_file(state):
     """Saves a cleaned version of the current state to a JSON file directly."""
     state_to_save = state.copy()
@@ -140,6 +258,320 @@ def load_state_from_file():
         with open(STATE_FILE, 'r') as f:
             return json.load(f)
     return None # File not found
+
+def get_brightness():
+    """Get current screen brightness level."""
+    try:
+        # Try brightnessctl first
+        result = subprocess.run(['brightnessctl', 'get'], 
+                              capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    
+    try:
+        # Try reading from sysfs
+        backlight_paths = glob.glob('/sys/class/backlight/*/brightness')
+        if backlight_paths:
+            with open(backlight_paths[0], 'r') as f:
+                return int(f.read().strip())
+    except (IOError, ValueError):
+        pass
+    
+    return None
+
+def set_brightness(level):
+    """Set screen brightness level."""
+    if level is None:
+        return False
+    
+    try:
+        # Try brightnessctl first
+        subprocess.run(['brightnessctl', 'set', str(level)], 
+                      capture_output=True, timeout=2, check=True)
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
+    
+    try:
+        # Try writing to sysfs
+        backlight_paths = glob.glob('/sys/class/backlight/*/brightness')
+        if backlight_paths:
+            with open(backlight_paths[0], 'w') as f:
+                f.write(str(level))
+            return True
+    except (IOError, PermissionError):
+        pass
+    
+    return False
+
+def get_external_displays():
+    """Get list of external displays that support DDC/CI."""
+    displays = []
+    try:
+        result = subprocess.run(['ddcutil', 'detect', '--brief'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            for line in result.stdout.split('\n'):
+                if line.strip().startswith('Display'):
+                    # Parse display number from "Display 1" or "Display 2"
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            display_num = int(parts[1])
+                            displays.append(display_num)
+                        except ValueError:
+                            pass
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
+    return displays
+
+def get_external_brightness(display_num):
+    """Get brightness of an external monitor via ddcutil."""
+    try:
+        result = subprocess.run(['ddcutil', 'getvcp', '10', '--display', str(display_num), '--brief'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            # Output format: "VCP 10 C 50 100" means current=50, max=100
+            parts = result.stdout.strip().split()
+            if len(parts) >= 4:
+                return int(parts[3])
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    
+    return None
+
+def set_external_brightness(display_num, level):
+    """Set brightness of an external monitor via ddcutil."""
+    if level is None:
+        return False
+    
+    try:
+        subprocess.run(['ddcutil', 'setvcp', '10', str(level), '--display', str(display_num)], 
+                      capture_output=True, timeout=5, check=True)
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
+    
+    return False
+
+def get_intel_pstate_max_perf():
+    """Get Intel P-state max performance percentage."""
+    try:
+        pstate_path = '/sys/devices/system/cpu/intel_pstate/max_perf_pct'
+        if os.path.exists(pstate_path):
+            with open(pstate_path, 'r') as f:
+                return int(f.read().strip())
+    except (IOError, PermissionError, ValueError):
+        pass
+    
+    return None
+
+def set_intel_pstate_max_perf(percent):
+    """Set Intel P-state max performance percentage."""
+    if percent is None:
+        return False
+    
+    try:
+        pstate_path = '/sys/devices/system/cpu/intel_pstate/max_perf_pct'
+        if os.path.exists(pstate_path):
+            subprocess.run(['sudo', '-n', 'tee', pstate_path], 
+                         input=str(percent).encode(), 
+                         capture_output=True, timeout=2, check=True)
+            return True
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
+    
+    return False
+
+def get_intel_pstate_no_turbo():
+    """Get Intel P-state turbo status."""
+    try:
+        turbo_path = '/sys/devices/system/cpu/intel_pstate/no_turbo'
+        if os.path.exists(turbo_path):
+            with open(turbo_path, 'r') as f:
+                return int(f.read().strip())
+    except (IOError, PermissionError, ValueError):
+        pass
+    
+    return None
+
+def set_intel_pstate_no_turbo(disabled):
+    """Set Intel P-state turbo status (1=disabled, 0=enabled)."""
+    if disabled is None:
+        return False
+    
+    try:
+        turbo_path = '/sys/devices/system/cpu/intel_pstate/no_turbo'
+        if os.path.exists(turbo_path):
+            subprocess.run(['sudo', '-n', 'tee', turbo_path], 
+                         input=str(disabled).encode(), 
+                         capture_output=True, timeout=2, check=True)
+            return True
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
+    
+    return False
+
+def get_cpu_governor():
+    """Get current CPU frequency governor."""
+    try:
+        cpu_path = '/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor'
+        if os.path.exists(cpu_path):
+            with open(cpu_path, 'r') as f:
+                return f.read().strip()
+    except (IOError, PermissionError):
+        pass
+    
+    return None
+
+def set_cpu_governor(governor):
+    """Set CPU frequency governor for all CPUs."""
+    if governor is None:
+        return False
+    
+    try:
+        # Try using cpupower
+        subprocess.run(['sudo', '-n', 'cpupower', 'frequency-set', '-g', governor], 
+                      capture_output=True, timeout=5, check=True)
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
+    
+    try:
+        # Try writing to sysfs for each CPU
+        cpu_paths = glob.glob('/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor')
+        if cpu_paths:
+            for cpu_path in cpu_paths:
+                try:
+                    subprocess.run(['sudo', '-n', 'tee', cpu_path], 
+                                 input=governor.encode(), 
+                                 capture_output=True, timeout=2, check=True)
+                except:
+                    pass
+            return True
+    except Exception:
+        pass
+    
+    return False
+
+def get_cpu_max_freq():
+    """Get current CPU maximum frequency limit."""
+    try:
+        cpu_path = '/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq'
+        if os.path.exists(cpu_path):
+            with open(cpu_path, 'r') as f:
+                return int(f.read().strip())
+    except (IOError, PermissionError, ValueError):
+        pass
+    
+    return None
+
+def get_cpu_min_freq():
+    """Get CPU minimum frequency."""
+    try:
+        cpu_path = '/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq'
+        if os.path.exists(cpu_path):
+            with open(cpu_path, 'r') as f:
+                return int(f.read().strip())
+    except (IOError, PermissionError, ValueError):
+        pass
+    
+    return None
+
+def set_cpu_max_freq(freq_khz):
+    """Set CPU maximum frequency limit for all CPUs."""
+    if freq_khz is None:
+        return False
+    
+    try:
+        # Write to sysfs for each CPU
+        cpu_paths = glob.glob('/sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq')
+        if cpu_paths:
+            for cpu_path in cpu_paths:
+                try:
+                    subprocess.run(['sudo', '-n', 'tee', cpu_path], 
+                                 input=str(freq_khz).encode(), 
+                                 capture_output=True, timeout=2, check=True)
+                except:
+                    pass
+            return True
+    except Exception:
+        pass
+    
+    return False
+
+def enter_break_mode():
+    """Apply system changes when entering break mode."""
+    # Lower laptop screen brightness
+    max_brightness_paths = glob.glob('/sys/class/backlight/*/max_brightness')
+    if max_brightness_paths:
+        try:
+            with open(max_brightness_paths[0], 'r') as f:
+                max_brightness = int(f.read().strip())
+            new_brightness = max(int(max_brightness * 0.05), 1)  # 5% of max or 1, whichever is higher
+        except:
+            new_brightness = 1
+    else:
+        new_brightness = 1
+    
+    if set_brightness(new_brightness):
+        print(f"  Laptop brightness lowered to {new_brightness}")
+    else:
+        print(f"  Warning: Could not lower laptop brightness")
+    
+    # Lower external monitor brightness
+    external_displays = get_external_displays()
+    for display_num in external_displays:
+        # Set to minimum brightness (0) for break mode
+        if set_external_brightness(display_num, 0):
+            print(f"  External display {display_num} brightness lowered to 0")
+        else:
+            print(f"  Warning: Could not lower brightness for display {display_num}")
+    
+    # Throttle CPU using Intel P-state
+    # Disable turbo boost
+    if set_intel_pstate_no_turbo(1):
+        print(f"  CPU turbo disabled")
+    else:
+        print(f"  Warning: Could not disable CPU turbo")
+    
+    # Set CPU to 0% max performance
+    if set_intel_pstate_max_perf(0):
+        print(f"  CPU max performance set to 0%")
+    else:
+        print(f"  Warning: Could not set CPU max performance")
+
+def exit_break_mode():
+    """Restore system settings to work mode."""
+    # Restore laptop brightness
+    if set_brightness(WORK_MODE_LAPTOP_BRIGHTNESS):
+        print(f"  Laptop brightness restored to {WORK_MODE_LAPTOP_BRIGHTNESS}")
+    else:
+        print(f"  Warning: Could not restore laptop brightness")
+    
+    # Restore external monitor brightness
+    external_displays = get_external_displays()
+    for display_num in external_displays:
+        if set_external_brightness(display_num, WORK_MODE_EXTERNAL_BRIGHTNESS):
+            print(f"  External display {display_num} brightness restored to {WORK_MODE_EXTERNAL_BRIGHTNESS}")
+        else:
+            print(f"  Warning: Could not restore brightness for display {display_num}")
+    
+    # Restore CPU to work mode settings
+    # Enable turbo boost
+    if set_intel_pstate_no_turbo(0):
+        print(f"  CPU turbo enabled")
+    else:
+        print(f"  Warning: Could not enable CPU turbo")
+    
+    # Set CPU to 100% max performance
+    if set_intel_pstate_max_perf(100):
+        print(f"  CPU max performance set to 100%")
+    else:
+        print(f"  Warning: Could not set CPU max performance")
 
 def parse_arguments():
     """Parses command-line arguments for the Pomodoro timer."""
@@ -229,10 +661,18 @@ def main():
     state["is_active"] = True 
     state["elapsed_since_last_activity"] = 0.0
 
-    last_activity_time = time.time() 
+    last_activity_time = time.time()
+    
+    # If starting in break mode, apply break mode settings
+    if state["current_mode"] == "break":
+        print("\nApplying break mode settings...")
+        enter_break_mode() 
     
     work_idle_count_up_rate = (args.work_time * 1.0) / args.break_time
     break_active_count_up_rate = (args.break_time * 1.0) / args.work_time
+    # Expose break rate globally for input handler computations
+    global GLOBAL_BREAK_ACTIVE_RATE
+    GLOBAL_BREAK_ACTIVE_RATE = break_active_count_up_rate
 
     # Start background activity monitoring threads
     activity_detection_running = True
@@ -245,6 +685,10 @@ def main():
     activity_thread = threading.Thread(target=activity_monitor_thread, daemon=True)
     activity_thread.start()
 
+    # Start user input handler thread for +/- time adjustments
+    input_thread = threading.Thread(target=user_input_handler, args=(state,), daemon=True)
+    input_thread.start()
+
     last_save_time = time.time()
     last_loop_time = time.time()
     
@@ -256,63 +700,92 @@ def main():
             current_loop_time = time.time()
             time_since_last_loop = current_loop_time - last_loop_time
             
-            today_str = datetime.now().strftime('%Y-%m-%d') # Get current date string
-            state["elapsed_since_last_activity"] = current_loop_time - last_activity_time
-            state["is_active"] = state["elapsed_since_last_activity"] <= ACTIVITY_THRESHOLD_SECONDS
+            # If prompting, pause timer updates and output; keep loop time fresh
+            if prompt_active:
+                last_loop_time = current_loop_time
+                time.sleep(0.1)
+                continue
             
-            # If we've been sleeping for more than the activity threshold, we likely woke from sleep
-            # During sleep, the user was definitely idle, so force idle behavior
-            if time_since_last_loop > ACTIVITY_THRESHOLD_SECONDS:
-                print(f"\nResumed after {time_since_last_loop:.1f} seconds (likely from sleep)")
-                state["is_active"] = False
-            
-            increment_today_work = False
-            if state["current_mode"] == "work":
-                if state["is_active"]:
-                    state["remaining_time"] -= time_since_last_loop
-                    increment_today_work = True
-                else:
-                    state["remaining_time"] += work_idle_count_up_rate * time_since_last_loop
-                    state["remaining_time"] = min(state["remaining_time"], max_idle_cap)
-            elif state["current_mode"] == "break":
-                if state["is_active"]:
-                    state["remaining_time"] += break_active_count_up_rate * time_since_last_loop
-                    increment_today_work = True # Active breaks still count towards daily total
-                else:
-                    state["remaining_time"] -= time_since_last_loop
-            
-            if increment_today_work:
-                current_day_total = state["daily_work_totals"].get(today_str, 0)
-                state["daily_work_totals"][today_str] = current_day_total + time_since_last_loop
-
-            if state["remaining_time"] <= 0:
-                print(" " * 120, end='\r') 
+            # Mutate state under lock to avoid races with the input thread
+            with state_lock:
+                today_str = datetime.now().strftime('%Y-%m-%d') # Get current date string
+                state["elapsed_since_last_activity"] = current_loop_time - last_activity_time
+                state["is_active"] = state["elapsed_since_last_activity"] <= ACTIVITY_THRESHOLD_SECONDS
                 
-                # Calculate how much time went negative
-                negative_time = abs(state["remaining_time"])
+                # If we've been sleeping for more than the activity threshold, we likely woke from sleep
+                # During sleep, the user was definitely idle, so force idle behavior
+                if time_since_last_loop > ACTIVITY_THRESHOLD_SECONDS:
+                    print(f"\nResumed after {time_since_last_loop:.1f} seconds (likely from sleep)")
+                    state["is_active"] = False
                 
+                increment_today_work = False
                 if state["current_mode"] == "work":
-                    # We're switching FROM work TO break, so apply work-mode corrections
-                    if negative_time > 0:
-                        extra_work_time = negative_time * work_idle_count_up_rate
-                        state["remaining_time"] += extra_work_time
+                    if state["is_active"]:
+                        state["remaining_time"] -= time_since_last_loop
+                        increment_today_work = True
+                    else:
+                        state["remaining_time"] += work_idle_count_up_rate * time_since_last_loop
                         state["remaining_time"] = min(state["remaining_time"], max_idle_cap)
-                        print(f"Adjusted for {negative_time:.1f}s of extra work time during sleep")
-                    
-                    state["current_mode"] = "break"
-                    state["remaining_time"] = float(break_time_seconds)
-                    print(f"\nStarting break ({args.break_time} minutes)...")
+                elif state["current_mode"] == "break":
+                    if state["is_active"]:
+                        state["remaining_time"] += break_active_count_up_rate * time_since_last_loop
+                        increment_today_work = True # Active breaks still count towards daily total
+                    else:
+                        state["remaining_time"] -= time_since_last_loop
+                
+                if increment_today_work:
+                    current_day_total = state["daily_work_totals"].get(today_str, 0)
+                    state["daily_work_totals"][today_str] = current_day_total + time_since_last_loop
+
+                if state["remaining_time"] <= 0:
+                    print(" " * 120, end='\r')
+
+                    # Calculate how much time went negative (spillover into the next mode)
+                    negative_time = abs(state["remaining_time"])
+
+                    if state["current_mode"] == "work":
+                        # Switch FROM work TO break
+                        spillover_seconds = negative_time
+                        state["current_mode"] = "break"
+
+                        if state["is_active"]:
+                            # Active spillover into break extends break via active-break rate
+                            adjusted_remaining = float(break_time_seconds) + spillover_seconds * break_active_count_up_rate
+                            spillover_msg = f"Spillover: +{spillover_seconds:.1f}s to break (active)."
+                        else:
+                            # Idle spillover into break reduces break directly
+                            adjusted_remaining = float(break_time_seconds) - spillover_seconds
+                            spillover_msg = f"Spillover: -{spillover_seconds:.1f}s from break (idle)."
+
+                        state["remaining_time"] = adjusted_remaining
+                        print(f"\nStarting break ({args.break_time} minutes)...")
+                        print(spillover_msg.rjust(120))
                         
-                elif state["current_mode"] == "break": 
-                    # We're switching FROM break TO work, so apply break-mode corrections
-                    if negative_time > 0:
-                        extra_break_time = negative_time * break_active_count_up_rate
-                        state["remaining_time"] -= extra_break_time
-                        print(f"Adjusted for {negative_time:.1f}s of extra break time during sleep")
-                    
-                    state["current_mode"] = "work"
-                    state["remaining_time"] = float(work_time_seconds)
-                    print(f"\nStarting work ({args.work_time} minutes)...")
+                        # Apply break mode system changes
+                        enter_break_mode()
+
+                    elif state["current_mode"] == "break":
+                        # Switch FROM break TO work
+                        spillover_seconds = negative_time
+                        state["current_mode"] = "work"
+
+                        if state["is_active"]:
+                            # Active spillover into work reduces work directly
+                            adjusted_remaining = float(work_time_seconds) - spillover_seconds
+                            spillover_msg = f"Spillover: -{spillover_seconds:.1f}s from work (active)."
+                        else:
+                            # Idle spillover into work increases work via work-idle rate
+                            adjusted_remaining = float(work_time_seconds) + spillover_seconds * work_idle_count_up_rate
+                            # Cap to the same max used when idling in work
+                            adjusted_remaining = min(adjusted_remaining, max_idle_cap)
+                            spillover_msg = f"Spillover: +{spillover_seconds:.1f}s to work (idle)."
+
+                        state["remaining_time"] = adjusted_remaining
+                        print(f"\nStarting work ({args.work_time} minutes)...")
+                        print(spillover_msg.rjust(120))
+                        
+                        # Restore normal system settings
+                        exit_break_mode()
             
             output(state, args)
 
@@ -326,6 +799,10 @@ def main():
     except KeyboardInterrupt:
         print(" " * 120, end='\r') 
         print("\nPomodoro Timer stopped.")
+        # Restore settings if we're in break mode
+        if state.get("current_mode") == "break":
+            print("Restoring system settings...")
+            exit_break_mode()
         save_state_to_file(state) 
     finally:
         activity_detection_running = False
@@ -335,13 +812,14 @@ def main():
 
 def output(state, args):
     """Handles all per-second console output."""
-    display_status_text = state.get("current_mode", "Unknown").capitalize()
-    remaining_time_val = state.get("remaining_time", 0)
-    elapsed_activity_val = state.get("elapsed_since_last_activity", 0)
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    
-    # Get today's work total, defaulting to 0 if not found
-    total_work_val = state["daily_work_totals"].get(today_str, 0)
+    # Snapshot state under lock to avoid races with the input thread
+    with state_lock:
+        display_status_text = state.get("current_mode", "Unknown").capitalize()
+        remaining_time_val = state.get("remaining_time", 0)
+        elapsed_activity_val = state.get("elapsed_since_last_activity", 0)
+        # Get today's work total, defaulting to 0 if not found
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        total_work_val = state["daily_work_totals"].get(today_str, 0)
     
     # Format time display - show MM:SS but allow minutes to go over 60
     remaining_seconds = int(max(0, remaining_time_val))
