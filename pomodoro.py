@@ -29,6 +29,7 @@ libinput_process = None
 
 STATE_FILE = "pomodoro_state.json"
 SAVE_INTERVAL_SECONDS = 10  # Save state every 10 seconds
+SETTINGS_ENFORCEMENT_INTERVAL_SECONDS = 10  # Apply mode settings every 10 seconds
 
 def get_input_devices():
     """Get list of input devices that can be monitored."""
@@ -503,75 +504,108 @@ def set_cpu_max_freq(freq_khz):
     
     return False
 
+def apply_mode_settings(mode, verbose=True):
+    """Apply system settings for the given mode (work or break).
+    
+    Args:
+        mode: Either "work" or "break"
+        verbose: Whether to print status messages (default True)
+    """
+    if mode == "break":
+        # Lower laptop screen brightness
+        max_brightness_paths = glob.glob('/sys/class/backlight/*/max_brightness')
+        if max_brightness_paths:
+            try:
+                with open(max_brightness_paths[0], 'r') as f:
+                    max_brightness = int(f.read().strip())
+                new_brightness = max(int(max_brightness * 0.05), 1)  # 5% of max or 1, whichever is higher
+            except:
+                new_brightness = 1
+        else:
+            new_brightness = 1
+        
+        if set_brightness(new_brightness):
+            if verbose:
+                print(f"  Laptop brightness lowered to {new_brightness}")
+        else:
+            if verbose:
+                print(f"  Warning: Could not lower laptop brightness")
+        
+        # Lower external monitor brightness
+        external_displays = get_external_displays()
+        for display_num in external_displays:
+            # Set to minimum brightness (0) for break mode
+            if set_external_brightness(display_num, 0):
+                if verbose:
+                    print(f"  External display {display_num} brightness lowered to 0")
+            else:
+                if verbose:
+                    print(f"  Warning: Could not lower brightness for display {display_num}")
+        
+        # Throttle CPU using Intel P-state
+        # Disable turbo boost
+        if set_intel_pstate_no_turbo(1):
+            if verbose:
+                print(f"  CPU turbo disabled")
+        else:
+            if verbose:
+                print(f"  Warning: Could not disable CPU turbo")
+        
+        # Set CPU to 0% max performance
+        if set_intel_pstate_max_perf(0):
+            if verbose:
+                print(f"  CPU max performance set to 0%")
+        else:
+            if verbose:
+                print(f"  Warning: Could not set CPU max performance")
+    
+    elif mode == "work":
+        # Restore laptop brightness
+        if set_brightness(WORK_MODE_LAPTOP_BRIGHTNESS):
+            if verbose:
+                print(f"  Laptop brightness restored to {WORK_MODE_LAPTOP_BRIGHTNESS}")
+        else:
+            if verbose:
+                print(f"  Warning: Could not restore laptop brightness")
+        
+        # Restore external monitor brightness
+        external_displays = get_external_displays()
+        for display_num in external_displays:
+            if set_external_brightness(display_num, WORK_MODE_EXTERNAL_BRIGHTNESS):
+                if verbose:
+                    print(f"  External display {display_num} brightness restored to {WORK_MODE_EXTERNAL_BRIGHTNESS}")
+            else:
+                if verbose:
+                    print(f"  Warning: Could not restore brightness for display {display_num}")
+        
+        # Restore CPU to work mode settings
+        # Enable turbo boost
+        if set_intel_pstate_no_turbo(0):
+            if verbose:
+                print(f"  CPU turbo enabled")
+        else:
+            if verbose:
+                print(f"  Warning: Could not enable CPU turbo")
+        
+        # Set CPU to 100% max performance
+        if set_intel_pstate_max_perf(100):
+            if verbose:
+                print(f"  CPU max performance set to 100%")
+        else:
+            if verbose:
+                print(f"  Warning: Could not set CPU max performance")
+
+def apply_settings_async(mode):
+    """Apply settings in a background thread (non-blocking)."""
+    apply_mode_settings(mode, verbose=False)
+
 def enter_break_mode():
     """Apply system changes when entering break mode."""
-    # Lower laptop screen brightness
-    max_brightness_paths = glob.glob('/sys/class/backlight/*/max_brightness')
-    if max_brightness_paths:
-        try:
-            with open(max_brightness_paths[0], 'r') as f:
-                max_brightness = int(f.read().strip())
-            new_brightness = max(int(max_brightness * 0.05), 1)  # 5% of max or 1, whichever is higher
-        except:
-            new_brightness = 1
-    else:
-        new_brightness = 1
-    
-    if set_brightness(new_brightness):
-        print(f"  Laptop brightness lowered to {new_brightness}")
-    else:
-        print(f"  Warning: Could not lower laptop brightness")
-    
-    # Lower external monitor brightness
-    external_displays = get_external_displays()
-    for display_num in external_displays:
-        # Set to minimum brightness (0) for break mode
-        if set_external_brightness(display_num, 0):
-            print(f"  External display {display_num} brightness lowered to 0")
-        else:
-            print(f"  Warning: Could not lower brightness for display {display_num}")
-    
-    # Throttle CPU using Intel P-state
-    # Disable turbo boost
-    if set_intel_pstate_no_turbo(1):
-        print(f"  CPU turbo disabled")
-    else:
-        print(f"  Warning: Could not disable CPU turbo")
-    
-    # Set CPU to 0% max performance
-    if set_intel_pstate_max_perf(0):
-        print(f"  CPU max performance set to 0%")
-    else:
-        print(f"  Warning: Could not set CPU max performance")
+    apply_mode_settings("break", verbose=True)
 
 def exit_break_mode():
     """Restore system settings to work mode."""
-    # Restore laptop brightness
-    if set_brightness(WORK_MODE_LAPTOP_BRIGHTNESS):
-        print(f"  Laptop brightness restored to {WORK_MODE_LAPTOP_BRIGHTNESS}")
-    else:
-        print(f"  Warning: Could not restore laptop brightness")
-    
-    # Restore external monitor brightness
-    external_displays = get_external_displays()
-    for display_num in external_displays:
-        if set_external_brightness(display_num, WORK_MODE_EXTERNAL_BRIGHTNESS):
-            print(f"  External display {display_num} brightness restored to {WORK_MODE_EXTERNAL_BRIGHTNESS}")
-        else:
-            print(f"  Warning: Could not restore brightness for display {display_num}")
-    
-    # Restore CPU to work mode settings
-    # Enable turbo boost
-    if set_intel_pstate_no_turbo(0):
-        print(f"  CPU turbo enabled")
-    else:
-        print(f"  Warning: Could not enable CPU turbo")
-    
-    # Set CPU to 100% max performance
-    if set_intel_pstate_max_perf(100):
-        print(f"  CPU max performance set to 100%")
-    else:
-        print(f"  Warning: Could not set CPU max performance")
+    apply_mode_settings("work", verbose=True)
 
 def parse_arguments():
     """Parses command-line arguments for the Pomodoro timer."""
@@ -663,10 +697,13 @@ def main():
 
     last_activity_time = time.time()
     
-    # If starting in break mode, apply break mode settings
+    # Apply settings for the starting mode
     if state["current_mode"] == "break":
         print("\nApplying break mode settings...")
-        enter_break_mode() 
+        enter_break_mode()
+    else:
+        print("\nApplying work mode settings...")
+        exit_break_mode() 
     
     work_idle_count_up_rate = (args.work_time * 1.0) / args.break_time
     break_active_count_up_rate = (args.break_time * 1.0) / args.work_time
@@ -691,6 +728,7 @@ def main():
 
     last_save_time = time.time()
     last_loop_time = time.time()
+    loop_counter = 0
     
     # Activity detection threshold - used for both idle detection and sleep detection
     ACTIVITY_THRESHOLD_SECONDS = 30
@@ -789,11 +827,19 @@ def main():
             
             output(state, args)
 
+            # Periodically enforce mode settings (brightness, CPU, etc.)
+            if loop_counter % SETTINGS_ENFORCEMENT_INTERVAL_SECONDS == 0:
+                # Spawn a thread to apply settings without blocking
+                current_mode = state.get("current_mode")
+                settings_thread = threading.Thread(target=apply_settings_async, args=(current_mode,), daemon=True)
+                settings_thread.start()
+
             if current_loop_time - last_save_time >= SAVE_INTERVAL_SECONDS:
                 save_state_to_file(state)
                 last_save_time = current_loop_time
 
             last_loop_time = current_loop_time
+            loop_counter += 1
             time.sleep(1)
 
     except KeyboardInterrupt:
