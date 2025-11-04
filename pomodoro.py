@@ -28,8 +28,14 @@ activity_detection_running = False
 libinput_process = None
 
 STATE_FILE = "pomodoro_state.json"
+SHUTDOWN_TRIGGER_FILE = "shutdown_trigger.json"
 SAVE_INTERVAL_SECONDS = 10  # Save state every 10 seconds
 SETTINGS_ENFORCEMENT_INTERVAL_SECONDS = 10  # Apply mode settings every 10 seconds
+
+# Shutdown enforcement: Once daily work exceeds this limit, a shutdown trigger is written to disk.
+# The system will shutdown after the grace period, even if the script is killed and restarted.
+DAILY_WORK_LIMIT_SECONDS = 4 * 60 * 60  # 4 hours
+SHUTDOWN_GRACE_PERIOD_SECONDS = 10 * 60  # 10 minutes
 
 def get_input_devices():
     """Get list of input devices that can be monitored."""
@@ -260,6 +266,93 @@ def load_state_from_file():
             return json.load(f)
     return None # File not found
 
+def check_and_set_shutdown_trigger(total_work_seconds):
+    """Check if work time exceeds limit and set shutdown trigger if needed.
+    
+    Returns the shutdown timestamp if trigger is active, None otherwise.
+    """
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    current_time = time.time()
+    
+    # Check if shutdown trigger file exists
+    if os.path.exists(SHUTDOWN_TRIGGER_FILE):
+        try:
+            with open(SHUTDOWN_TRIGGER_FILE, 'r') as f:
+                trigger_data = json.load(f)
+                # Check if it's for today
+                if trigger_data.get('date') == today_str:
+                    return trigger_data.get('shutdown_time')
+        except (json.JSONDecodeError, IOError):
+            pass
+    
+    # If total work exceeds limit and no trigger exists, create it
+    if total_work_seconds >= DAILY_WORK_LIMIT_SECONDS:
+        shutdown_time = current_time + SHUTDOWN_GRACE_PERIOD_SECONDS
+        trigger_data = {
+            'date': today_str,
+            'shutdown_time': shutdown_time,
+            'work_time_when_triggered': total_work_seconds,
+            'shutdown_count': 0
+        }
+        try:
+            with open(SHUTDOWN_TRIGGER_FILE, 'w') as f:
+                json.dump(trigger_data, f, indent=4)
+            # Print warning when trigger is first set
+            print("\n" + "="*60)
+            print("⚠️  4-HOUR WORK LIMIT EXCEEDED ⚠️")
+            print(f"System will shutdown in {SHUTDOWN_GRACE_PERIOD_SECONDS // 60} minutes")
+            print("This shutdown CANNOT be canceled by killing the script")
+            print("="*60 + "\n")
+            return shutdown_time
+        except IOError:
+            pass
+    
+    return None
+
+def reset_shutdown_trigger():
+    """Reset the shutdown trigger to give a new 5-minute window after shutdown."""
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    current_time = time.time()
+    
+    if os.path.exists(SHUTDOWN_TRIGGER_FILE):
+        try:
+            with open(SHUTDOWN_TRIGGER_FILE, 'r') as f:
+                trigger_data = json.load(f)
+            
+            # Only reset if it's still today's trigger
+            if trigger_data.get('date') == today_str:
+                new_shutdown_time = current_time + SHUTDOWN_GRACE_PERIOD_SECONDS
+                trigger_data['shutdown_time'] = new_shutdown_time
+                trigger_data['shutdown_count'] = trigger_data.get('shutdown_count', 0) + 1
+                
+                with open(SHUTDOWN_TRIGGER_FILE, 'w') as f:
+                    json.dump(trigger_data, f, indent=4)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+def execute_shutdown():
+    """Execute system shutdown command."""
+    # Reset the trigger before shutting down so we get a new 5-minute window on reboot
+    reset_shutdown_trigger()
+    
+    print("\n" + "="*60)
+    print("SHUTTING DOWN: 4-hour work limit exceeded")
+    print("You will have another 5 minutes after restart")
+    print("="*60)
+    try:
+        subprocess.run(['sudo', '-n', 'shutdown', '-h', 'now'], check=True)
+    except subprocess.CalledProcessError:
+        # If passwordless sudo doesn't work, try regular shutdown
+        try:
+            subprocess.run(['shutdown', '-h', 'now'], check=True)
+        except subprocess.CalledProcessError:
+            # Last resort: try systemctl
+            try:
+                subprocess.run(['systemctl', 'poweroff'], check=True)
+            except subprocess.CalledProcessError:
+                print("ERROR: Could not execute shutdown command")
+                print("Please run: sudo shutdown -h now")
+
 def get_brightness():
     """Get current screen brightness level."""
     try:
@@ -358,152 +451,6 @@ def set_external_brightness(display_num, level):
     
     return False
 
-def get_intel_pstate_max_perf():
-    """Get Intel P-state max performance percentage."""
-    try:
-        pstate_path = '/sys/devices/system/cpu/intel_pstate/max_perf_pct'
-        if os.path.exists(pstate_path):
-            with open(pstate_path, 'r') as f:
-                return int(f.read().strip())
-    except (IOError, PermissionError, ValueError):
-        pass
-    
-    return None
-
-def set_intel_pstate_max_perf(percent):
-    """Set Intel P-state max performance percentage."""
-    if percent is None:
-        return False
-    
-    try:
-        pstate_path = '/sys/devices/system/cpu/intel_pstate/max_perf_pct'
-        if os.path.exists(pstate_path):
-            subprocess.run(['sudo', '-n', 'tee', pstate_path], 
-                         input=str(percent).encode(), 
-                         capture_output=True, timeout=2, check=True)
-            return True
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        pass
-    
-    return False
-
-def get_intel_pstate_no_turbo():
-    """Get Intel P-state turbo status."""
-    try:
-        turbo_path = '/sys/devices/system/cpu/intel_pstate/no_turbo'
-        if os.path.exists(turbo_path):
-            with open(turbo_path, 'r') as f:
-                return int(f.read().strip())
-    except (IOError, PermissionError, ValueError):
-        pass
-    
-    return None
-
-def set_intel_pstate_no_turbo(disabled):
-    """Set Intel P-state turbo status (1=disabled, 0=enabled)."""
-    if disabled is None:
-        return False
-    
-    try:
-        turbo_path = '/sys/devices/system/cpu/intel_pstate/no_turbo'
-        if os.path.exists(turbo_path):
-            subprocess.run(['sudo', '-n', 'tee', turbo_path], 
-                         input=str(disabled).encode(), 
-                         capture_output=True, timeout=2, check=True)
-            return True
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        pass
-    
-    return False
-
-def get_cpu_governor():
-    """Get current CPU frequency governor."""
-    try:
-        cpu_path = '/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor'
-        if os.path.exists(cpu_path):
-            with open(cpu_path, 'r') as f:
-                return f.read().strip()
-    except (IOError, PermissionError):
-        pass
-    
-    return None
-
-def set_cpu_governor(governor):
-    """Set CPU frequency governor for all CPUs."""
-    if governor is None:
-        return False
-    
-    try:
-        # Try using cpupower
-        subprocess.run(['sudo', '-n', 'cpupower', 'frequency-set', '-g', governor], 
-                      capture_output=True, timeout=5, check=True)
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        pass
-    
-    try:
-        # Try writing to sysfs for each CPU
-        cpu_paths = glob.glob('/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor')
-        if cpu_paths:
-            for cpu_path in cpu_paths:
-                try:
-                    subprocess.run(['sudo', '-n', 'tee', cpu_path], 
-                                 input=governor.encode(), 
-                                 capture_output=True, timeout=2, check=True)
-                except:
-                    pass
-            return True
-    except Exception:
-        pass
-    
-    return False
-
-def get_cpu_max_freq():
-    """Get current CPU maximum frequency limit."""
-    try:
-        cpu_path = '/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq'
-        if os.path.exists(cpu_path):
-            with open(cpu_path, 'r') as f:
-                return int(f.read().strip())
-    except (IOError, PermissionError, ValueError):
-        pass
-    
-    return None
-
-def get_cpu_min_freq():
-    """Get CPU minimum frequency."""
-    try:
-        cpu_path = '/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq'
-        if os.path.exists(cpu_path):
-            with open(cpu_path, 'r') as f:
-                return int(f.read().strip())
-    except (IOError, PermissionError, ValueError):
-        pass
-    
-    return None
-
-def set_cpu_max_freq(freq_khz):
-    """Set CPU maximum frequency limit for all CPUs."""
-    if freq_khz is None:
-        return False
-    
-    try:
-        # Write to sysfs for each CPU
-        cpu_paths = glob.glob('/sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq')
-        if cpu_paths:
-            for cpu_path in cpu_paths:
-                try:
-                    subprocess.run(['sudo', '-n', 'tee', cpu_path], 
-                                 input=str(freq_khz).encode(), 
-                                 capture_output=True, timeout=2, check=True)
-                except:
-                    pass
-            return True
-    except Exception:
-        pass
-    
-    return False
-
 def apply_mode_settings(mode, verbose=True):
     """Apply system settings for the given mode (work or break).
     
@@ -541,23 +488,6 @@ def apply_mode_settings(mode, verbose=True):
             else:
                 if verbose:
                     print(f"  Warning: Could not lower brightness for display {display_num}")
-        
-        # Throttle CPU using Intel P-state
-        # Disable turbo boost
-        if set_intel_pstate_no_turbo(1):
-            if verbose:
-                print(f"  CPU turbo disabled")
-        else:
-            if verbose:
-                print(f"  Warning: Could not disable CPU turbo")
-        
-        # Set CPU to 0% max performance
-        if set_intel_pstate_max_perf(0):
-            if verbose:
-                print(f"  CPU max performance set to 0%")
-        else:
-            if verbose:
-                print(f"  Warning: Could not set CPU max performance")
     
     elif mode == "work":
         # Restore laptop brightness
@@ -577,23 +507,6 @@ def apply_mode_settings(mode, verbose=True):
             else:
                 if verbose:
                     print(f"  Warning: Could not restore brightness for display {display_num}")
-        
-        # Restore CPU to work mode settings
-        # Enable turbo boost
-        if set_intel_pstate_no_turbo(0):
-            if verbose:
-                print(f"  CPU turbo enabled")
-        else:
-            if verbose:
-                print(f"  Warning: Could not enable CPU turbo")
-        
-        # Set CPU to 100% max performance
-        if set_intel_pstate_max_perf(100):
-            if verbose:
-                print(f"  CPU max performance set to 100%")
-        else:
-            if verbose:
-                print(f"  Warning: Could not set CPU max performance")
 
 def apply_settings_async(mode):
     """Apply settings in a background thread (non-blocking)."""
@@ -655,7 +568,7 @@ def main():
 
     work_time_seconds = args.work_time * 60
     break_time_seconds = args.break_time * 60
-    max_idle_cap = work_time_seconds * 2 # Maximum time allowed when counting up due to idle
+    max_idle_cap = work_time_seconds * 1.5 # Maximum time allowed when counting up due to idle
 
     state = load_state_from_file() # Attempt to load state
     if not state: # If loading failed or no state file
@@ -732,11 +645,34 @@ def main():
     
     # Activity detection threshold - used for both idle detection and sleep detection
     ACTIVITY_THRESHOLD_SECONDS = 30
+    
+    # Check for existing shutdown trigger on startup
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    total_work_today = state["daily_work_totals"].get(today_str, 0)
+    shutdown_time = check_and_set_shutdown_trigger(total_work_today)
+    if shutdown_time:
+        time_until_shutdown = shutdown_time - time.time()
+        if time_until_shutdown <= 0:
+            # If time has already passed, shutdown immediately
+            execute_shutdown()
+            sys.exit(0)
+        else:
+            print(f"\nWARNING: Shutdown scheduled in {int(time_until_shutdown)} seconds!")
+            print(f"4-hour work limit has been exceeded.\n")
 
     try:
         while True:
             current_loop_time = time.time()
             time_since_last_loop = current_loop_time - last_loop_time
+            
+            # Check shutdown trigger at every iteration (in case script was killed and restarted)
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            total_work_today = state["daily_work_totals"].get(today_str, 0)
+            shutdown_time = check_and_set_shutdown_trigger(total_work_today)
+            if shutdown_time and time.time() >= shutdown_time:
+                print("\n" * 5)
+                execute_shutdown()
+                sys.exit(0)
             
             # If prompting, pause timer updates and output; keep loop time fresh
             if prompt_active:
@@ -768,12 +704,30 @@ def main():
                     if state["is_active"]:
                         state["remaining_time"] += break_active_count_up_rate * time_since_last_loop
                         increment_today_work = True # Active breaks still count towards daily total
+                        
+                        # Check if break time exceeds 1.5 * break_time during active break
+                        if state["remaining_time"] > 1.5 * break_time_seconds:
+                            print("\n" * 5)
+                            print("="*60)
+                            print("⚠️  BREAK TIME LIMIT EXCEEDED (1.5x) ⚠️")
+                            print("Shutting down due to excessive active break time")
+                            print("="*60)
+                            execute_shutdown()
+                            sys.exit(0)
                     else:
                         state["remaining_time"] -= time_since_last_loop
                 
                 if increment_today_work:
                     current_day_total = state["daily_work_totals"].get(today_str, 0)
                     state["daily_work_totals"][today_str] = current_day_total + time_since_last_loop
+                    
+                    # Check if we've exceeded the daily work limit
+                    new_total = state["daily_work_totals"][today_str]
+                    shutdown_time = check_and_set_shutdown_trigger(new_total)
+                    if shutdown_time and time.time() >= shutdown_time:
+                        print("\n" * 5)
+                        execute_shutdown()
+                        sys.exit(0)
 
                 if state["remaining_time"] <= 0:
                     print(" " * 120, end='\r')
@@ -827,7 +781,7 @@ def main():
             
             output(state, args)
 
-            # Periodically enforce mode settings (brightness, CPU, etc.)
+            # Periodically enforce mode settings (brightness, etc.)
             if loop_counter % SETTINGS_ENFORCEMENT_INTERVAL_SECONDS == 0:
                 # Spawn a thread to apply settings without blocking
                 current_mode = state.get("current_mode")
@@ -883,13 +837,37 @@ def output(state, args):
     activity_status = "Active" if state.get("is_active", True) else "Idle"
     mode_info = f"{display_status_text}"
     status_info = f"{activity_status}"
+    
+    # Check for shutdown warning
+    shutdown_warning = ""
+    shutdown_time = check_and_set_shutdown_trigger(total_work_val)
+    if shutdown_time:
+        time_until_shutdown = max(0, shutdown_time - time.time())
+        shutdown_minutes = int(time_until_shutdown // 60)
+        shutdown_seconds = int(time_until_shutdown % 60)
+        shutdown_warning = f"\n⚠️  SHUTDOWN IN {shutdown_minutes:02d}:{shutdown_seconds:02d} ⚠️"
+    
+    # Check for break time warning (when in active break mode and exceeding 1.0x break time)
+    break_time_warning = ""
+    break_time_seconds = args.break_time * 60
+    if (state.get("current_mode") == "break" and 
+        state.get("is_active", False) and 
+        remaining_time_val > break_time_seconds):
+        excess_seconds = remaining_time_val - break_time_seconds
+        excess_minutes = int(excess_seconds // 60)
+        excess_secs = int(excess_seconds % 60)
+        if remaining_time_val > 1.5 * break_time_seconds:
+            # Show critical warning when approaching shutdown threshold
+            break_time_warning = f"\n⚠️  BREAK TIME EXCEEDED: {excess_minutes:02d}:{excess_secs:02d} OVER (SHUTDOWN IMMINENT) ⚠️"
+        else:
+            break_time_warning = f"\n⚠️  BREAK TIME EXCEEDED: {excess_minutes:02d}:{excess_secs:02d} OVER ⚠️"
 
     output_str = (
         f"\n\n\n{mode_info}\n"
         f"{status_info}\n"
         f"{activity_info}\n"
-        f"{total_work_time_str}\n"
-        f"{display_time_str} Time Left"
+        f"{total_work_time_str}{shutdown_warning}\n"
+        f"{display_time_str} Time Left{break_time_warning}"
     )
     print(output_str, end='')
 
