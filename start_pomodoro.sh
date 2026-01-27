@@ -23,7 +23,7 @@ launch_cosmic_term() {
         --working-directory="/home/user/Projects/breaktimer" \
         -- bash -c "
             echo 'Starting Pomodoro Timer...';
-            python3 pomodoro.py --work-time 30 --break-time 10 || {
+            python3 pomodoro.py || {
                 echo 'Pomodoro script failed. Press Enter to close.';
                 read;
             }
@@ -48,7 +48,7 @@ launch_gnome_terminal() {
         --working-directory="/home/user/Projects/breaktimer" \
         -- bash -c "
             echo 'Starting Pomodoro Timer...';
-            python3 pomodoro.py --work-time 30 --break-time 10 || {
+            python3 pomodoro.py || {
                 echo 'Pomodoro script failed. Press Enter to close.';
                 read;
             }
