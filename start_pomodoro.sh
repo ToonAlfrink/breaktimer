@@ -3,15 +3,13 @@
 # Pomodoro Timer Auto-Launcher for COSMIC Desktop
 # This script automatically starts the Pomodoro timer in a terminal window
 
-# Log file for debugging
-LOG_FILE="/home/user/Projects/breaktimer/autostart.log"
-echo "$(date): Starting Pomodoro Timer" >> "$LOG_FILE"
-
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="$SCRIPT_DIR/autostart.log"
 # Wait for the desktop environment to fully load
 sleep 10
 
 # Change to the script directory
-cd "/home/user/Projects/breaktimer" || {
+cd "$SCRIPT_DIR" || {
     echo "$(date): Failed to change to breaktimer directory" >> "$LOG_FILE"
     exit 1
 }
@@ -20,9 +18,8 @@ cd "/home/user/Projects/breaktimer" || {
 launch_cosmic_term() {
     cosmic-term \
         --title="Pomodoro Timer" \
-        --working-directory="/home/user/Projects/breaktimer" \
+        --working-directory="$SCRIPT_DIR" \
         -- bash -c "
-            echo 'Starting Pomodoro Timer...';
             python3 pomodoro.py || {
                 echo 'Pomodoro script failed. Press Enter to close.';
                 read;
@@ -45,9 +42,8 @@ launch_gnome_terminal() {
     gnome-terminal \
         $GEOMETRY_ARG \
         --title="Pomodoro Timer" \
-        --working-directory="/home/user/Projects/breaktimer" \
+        --working-directory="$SCRIPT_DIR" \
         -- bash -c "
-            echo 'Starting Pomodoro Timer...';
             python3 pomodoro.py || {
                 echo 'Pomodoro script failed. Press Enter to close.';
                 read;

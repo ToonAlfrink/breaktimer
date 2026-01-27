@@ -5,86 +5,134 @@ import os
 import subprocess
 import threading
 import sys
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from brightness_control import set_brightness_by_fraction
 from mouse_sensitivity_control import set_sensitivity_by_fraction, save_original_sensitivity, restore_original_sensitivity
 
-# Lock to protect shared state across threads
-state_lock = threading.Lock()
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_HOUR = 3600
 
-TIMER_MAX_SECONDS = 3600.0
-
-# Global variable to store the timestamp of the last detected activity
-last_activity_time = time.time()
-activity_detection_running = False
-libinput_process = None
+TIMER_MAX_SECONDS = SECONDS_PER_HOUR
 
 STATE_FILE = "pomodoro_state.json"
-SHUTDOWN_TRIGGER_FILE = "shutdown_trigger.json"
 SAVE_INTERVAL_SECONDS = 10
 
-# Shutdown enforcement: Once daily work exceeds this limit, a shutdown trigger is written to disk.
-# The system will shutdown after the grace period, even if the script is killed and restarted.
-DAILY_WORK_LIMIT_SECONDS_DEFAULT = 8 * 60 * 60  # 8 hours (default, can be overridden via --daily-work-limit)
-SHUTDOWN_GRACE_PERIOD_SECONDS = 10 * 60  # 10 minutes
 
- 
-
-def libinput_monitor_thread():
-    """Background thread to continuously monitor libinput events."""
-    global last_activity_time, activity_detection_running, libinput_process
+@dataclass
+class TimerState:
+    """Encapsulates all timer state data."""
+    remaining_time: float
+    daily_work_totals: dict = field(default_factory=dict)
+    last_saved_time: float = None
+    is_active: bool = True
+    elapsed_since_last_activity: float = 0.0
     
-    try:
-        # Start libinput debug-events process
-        libinput_process = subprocess.Popen(
-            ['libinput', 'debug-events'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization."""
+        return {k: v for k, v in asdict(self).items() if v is not None}
+    
+    @classmethod
+    def from_dict(cls, data):
+        """Create from dictionary loaded from JSON."""
+        return cls(
+            remaining_time=data.get("remaining_time", TIMER_MAX_SECONDS),
+            daily_work_totals=data.get("daily_work_totals", {}),
+            last_saved_time=data.get("last_saved_time")
         )
-        
-        # Read output line by line
-        for line in libinput_process.stdout:
-            if not activity_detection_running:
-                break
-                
-            # Any line from libinput means activity
-            if line.strip():
-                last_activity_time = time.time()
-                
-    except Exception as e:
-        print(f"Warning: libinput monitoring failed: {e}")
-    finally:
-        if libinput_process:
-            libinput_process.terminate()
-            libinput_process.wait()
 
- 
+
+def today_str():
+    """Returns today's date as YYYY-MM-DD string."""
+    return datetime.now().strftime('%Y-%m-%d')
+
+def seconds_to_hours(seconds):
+    """Convert seconds to hours."""
+    return seconds / SECONDS_PER_HOUR
+
+def format_time(seconds):
+    """Format seconds as MM:SS."""
+    seconds = int(max(0, seconds))
+    minutes, secs = divmod(seconds, SECONDS_PER_MINUTE)
+    return f"{minutes}:{secs:02d}"
+
+
+class ActivityMonitor:
+    """Encapsulates activity detection via libinput monitoring."""
+    
+    def __init__(self):
+        self.last_activity_time = time.time()
+        self.is_running = False
+        self.libinput_process = None
+        self.monitor_thread = None
+        self.lock = threading.Lock()
+    
+    def start(self):
+        """Start the activity monitoring thread."""
+        self.is_running = True
+        self.monitor_thread = threading.Thread(target=self._monitor_thread, daemon=True)
+        self.monitor_thread.start()
+    
+    def stop(self):
+        """Stop the activity monitoring thread."""
+        self.is_running = False
+        if self.libinput_process:
+            self.libinput_process.terminate()
+            self.libinput_process.wait()
+    
+    def get_last_activity_time(self):
+        """Get the timestamp of the last detected activity."""
+        with self.lock:
+            return self.last_activity_time
+    
+    def set_last_activity_time(self, timestamp):
+        """Set the timestamp of the last detected activity."""
+        with self.lock:
+            self.last_activity_time = timestamp
+    
+    def _monitor_thread(self):
+        """Background thread to continuously monitor libinput events."""
+        try:
+            self.libinput_process = subprocess.Popen(
+                ['libinput', 'debug-events'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            for line in self.libinput_process.stdout:
+                if not self.is_running:
+                    break
+                    
+                if line.strip():
+                    with self.lock:
+                        self.last_activity_time = time.time()
+                    
+        except Exception as e:
+            pass
+        finally:
+            if self.libinput_process:
+                self.libinput_process.terminate()
+                self.libinput_process.wait()
+
 
 def save_state_to_file(state):
     """Saves a cleaned version of the current state to a JSON file directly."""
-    state_to_save = state.copy()
-    # Remove ephemeral or deprecated keys before saving
-    state_to_save.pop('is_active', None)
-    state_to_save.pop('elapsed_since_last_activity', None)
-    state_to_save.pop('total_work_today_seconds', None)
-    state_to_save.pop('current_mode', None)
-    # Persist a wall-clock timestamp to account for offline time across restarts
-    state_to_save['last_saved_time'] = time.time()
+    state.last_saved_time = time.time()
+    state_to_save = state.to_dict()
 
     with open(STATE_FILE, 'w') as f:
         json.dump(state_to_save, f, indent=4)
-    # No error handling
 
 def load_state_from_file():
     """Loads the state from a JSON file. Returns None if file not found or error."""
     if os.path.exists(STATE_FILE):
-        # Attempt to load; will crash on error if file is corrupted
         with open(STATE_FILE, 'r') as f:
-            return json.load(f)
-    return None # File not found
+            data = json.load(f)
+            return TimerState.from_dict(data)
+    return None
 
 def compute_offline_duration_seconds(state):
     """Compute time elapsed since the last persisted state, used to treat downtime as idle.
@@ -92,113 +140,182 @@ def compute_offline_duration_seconds(state):
     Prefers the explicit 'last_saved_time' we persist, with a fallback to the
     filesystem modification time of the state file if that key is missing.
     """
-    try:
-        saved_epoch = state.get('last_saved_time')
-    except Exception:
-        saved_epoch = None
-    if not saved_epoch:
-        try:
-            saved_epoch = os.path.getmtime(STATE_FILE) if os.path.exists(STATE_FILE) else None
-        except Exception:
-            saved_epoch = None
+    saved_epoch = state.last_saved_time
+    if not saved_epoch and os.path.exists(STATE_FILE):
+        saved_epoch = os.path.getmtime(STATE_FILE)
     return max(0.0, time.time() - saved_epoch) if saved_epoch else 0.0
 
-def check_and_set_shutdown_trigger(total_work_seconds, daily_work_limit_seconds):
-    """Check if work time exceeds limit and set shutdown trigger if needed.
+def execute_shutdown():
+    """Execute system shutdown command."""
+    shutdown_commands = [
+        ['sudo', '-n', 'shutdown', '-h', 'now'],
+        ['shutdown', '-h', 'now'],
+        ['systemctl', 'poweroff']
+    ]
     
-    Args:
-        total_work_seconds: Total work time in seconds for today
-        daily_work_limit_seconds: Daily work limit in seconds
-    
-    Returns the shutdown timestamp if trigger is active, None otherwise.
-    """
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    current_time = time.time()
-    
-    # Check if shutdown trigger file exists
-    if os.path.exists(SHUTDOWN_TRIGGER_FILE):
+    for cmd in shutdown_commands:
         try:
-            with open(SHUTDOWN_TRIGGER_FILE, 'r') as f:
-                trigger_data = json.load(f)
-                # Check if it's for today
-                if trigger_data.get('date') == today_str:
-                    return trigger_data.get('shutdown_time')
-        except (json.JSONDecodeError, IOError):
-            pass
-    
-    # If total work exceeds limit and no trigger exists, create it
-    if total_work_seconds >= daily_work_limit_seconds:
-        shutdown_time = current_time + SHUTDOWN_GRACE_PERIOD_SECONDS
-        trigger_data = {
-            'date': today_str,
-            'shutdown_time': shutdown_time,
-            'work_time_when_triggered': total_work_seconds,
-            'shutdown_count': 0
-        }
-        try:
-            with open(SHUTDOWN_TRIGGER_FILE, 'w') as f:
-                json.dump(trigger_data, f, indent=4)
-            # Print warning when trigger is first set
-            limit_hours = daily_work_limit_seconds / 3600
-            print("\n" + "="*60)
-            print(f"⚠️  {limit_hours:.0f}-HOUR WORK LIMIT EXCEEDED ⚠️")
-            print(f"System will shutdown in {SHUTDOWN_GRACE_PERIOD_SECONDS // 60} minutes")
-            print("This shutdown CANNOT be canceled by killing the script")
-            print("="*60 + "\n")
-            return shutdown_time
-        except IOError:
-            pass
-    
-    return None
-
-def reset_shutdown_trigger():
-    """Reset the shutdown trigger to give a new 5-minute window after shutdown."""
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    current_time = time.time()
-    
-    if os.path.exists(SHUTDOWN_TRIGGER_FILE):
-        try:
-            with open(SHUTDOWN_TRIGGER_FILE, 'r') as f:
-                trigger_data = json.load(f)
-            
-            # Only reset if it's still today's trigger
-            if trigger_data.get('date') == today_str:
-                new_shutdown_time = current_time + SHUTDOWN_GRACE_PERIOD_SECONDS
-                trigger_data['shutdown_time'] = new_shutdown_time
-                trigger_data['shutdown_count'] = trigger_data.get('shutdown_count', 0) + 1
-                
-                with open(SHUTDOWN_TRIGGER_FILE, 'w') as f:
-                    json.dump(trigger_data, f, indent=4)
-        except (json.JSONDecodeError, IOError):
-            pass
-
-def execute_shutdown(daily_work_limit_seconds):
-    """Execute system shutdown command.
-    
-    Args:
-        daily_work_limit_seconds: Daily work limit in seconds (for display)
-    """
-    # Reset the trigger before shutting down so we get a new 5-minute window on reboot
-    reset_shutdown_trigger()
-    
-    limit_hours = daily_work_limit_seconds / 3600
-    print("\n" + "="*60)
-    print(f"SHUTTING DOWN: {limit_hours:.0f}-hour work limit exceeded")
-    print("You will have another 5 minutes after restart")
-    print("="*60)
-    try:
-        subprocess.run(['sudo', '-n', 'shutdown', '-h', 'now'], check=True)
-    except subprocess.CalledProcessError:
-        # If passwordless sudo doesn't work, try regular shutdown
-        try:
-            subprocess.run(['shutdown', '-h', 'now'], check=True)
+            subprocess.run(cmd, check=True)
+            return
         except subprocess.CalledProcessError:
-            # Last resort: try systemctl
-            try:
-                subprocess.run(['systemctl', 'poweroff'], check=True)
-            except subprocess.CalledProcessError:
-                print("ERROR: Could not execute shutdown command")
-                print("Please run: sudo shutdown -h now")
+            continue
+
+
+class TimerLoop:
+    """Encapsulates the main timer loop logic, following Single Responsibility Principle."""
+    
+    ACTIVITY_THRESHOLD_SECONDS = SECONDS_PER_MINUTE
+    ADJUSTMENT_INTERVAL_SECONDS = 10
+    
+    def __init__(self, state, args, offline_duration_seconds, activity_monitor):
+        self.state = state
+        self.args = args
+        self.activity_monitor = activity_monitor
+        self.last_loop_time = time.time() - offline_duration_seconds if offline_duration_seconds > 0 else time.time()
+        self.last_save_time = time.time()
+        self.last_adjustment_time = time.time()
+        self.state_lock = threading.Lock()
+        self.previous_output_lines = 0
+    
+    def _update_activity_status(self, current_loop_time, time_since_last_loop):
+        """Update activity detection status based on user input."""
+        last_activity_time = self.activity_monitor.get_last_activity_time()
+        self.state.elapsed_since_last_activity = current_loop_time - last_activity_time
+        
+        if time_since_last_loop > self.ACTIVITY_THRESHOLD_SECONDS:
+            self.activity_monitor.set_last_activity_time(current_loop_time - time_since_last_loop)
+            self.state.elapsed_since_last_activity = time_since_last_loop
+            self.state.is_active = False
+        else:
+            self.state.is_active = self.state.elapsed_since_last_activity <= self.ACTIVITY_THRESHOLD_SECONDS
+    
+    def _adjust_timer(self, time_since_last_loop):
+        """Adjust remaining time based on activity status."""
+        today = today_str()
+        if self.state.is_active:
+            self.state.remaining_time -= time_since_last_loop
+            current_day_total = self.state.daily_work_totals.get(today, 0)
+            self.state.daily_work_totals[today] = current_day_total + time_since_last_loop
+        else:
+            self.state.remaining_time += time_since_last_loop
+            self.state.remaining_time = min(self.state.remaining_time, TIMER_MAX_SECONDS)
+    
+    def _check_shutdown(self):
+        """Check if timer reached zero and trigger shutdown if needed."""
+        if self.state.remaining_time <= 0:
+            execute_shutdown()
+            return True
+        return False
+    
+    def _update_state(self, current_loop_time, time_since_last_loop):
+        """Update timer state based on activity and elapsed time.
+        
+        Args:
+            current_loop_time: Current timestamp
+            time_since_last_loop: Seconds since last loop iteration
+            
+        Returns:
+            True if shutdown was triggered, False otherwise
+        """
+        with self.state_lock:
+            self._update_activity_status(current_loop_time, time_since_last_loop)
+            self._adjust_timer(time_since_last_loop)
+            return self._check_shutdown()
+    
+    def _apply_adjustments(self, remaining_fraction, current_loop_time):
+        """Apply brightness and sensitivity adjustments if interval has elapsed."""
+        if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
+            set_brightness_by_fraction(remaining_fraction, TIMER_MAX_SECONDS)
+            set_sensitivity_by_fraction(remaining_fraction, TIMER_MAX_SECONDS)
+            self.last_adjustment_time = current_loop_time
+    
+    def _get_color_for_fraction(self, fraction):
+        """Get ANSI color code with smooth gradient from blue to green to yellow to red to black."""
+        fraction = max(0.0, min(1.0, fraction))
+        
+        if fraction > 0.75:
+            t = (1.0 - fraction) / 0.25
+            r = 0
+            g = int(t * 255)
+            b = int(255 - t * 255)
+        elif fraction >= 0.5:
+            t = (0.75 - fraction) / 0.25
+            r = int(t * 255)
+            g = 255
+            b = 0
+        elif fraction > 0.25:
+            t = (0.5 - fraction) / 0.25
+            r = 255
+            g = int((1 - t) * 255)
+            b = 0
+        else:
+            t = (0.25 - fraction) / 0.25
+            r = int((1 - t) * 255)
+            g = 0
+            b = 0
+        
+        return f"\033[38;2;{r};{g};{b}m"
+    
+    def _create_mana_bar(self, remaining, max_time, bar_height):
+        """Create a visual mana bar showing remaining time."""
+        filled = max(0, min(int((remaining / max_time) * bar_height), bar_height))
+        empty = bar_height - filled
+        reset = "\033[0m"
+        
+        fraction = remaining / max_time
+        color = self._get_color_for_fraction(fraction)
+        
+        bar = []
+        for i in range(bar_height):
+            if i < empty:
+                bar.append("░")
+            else:
+                bar.append(f"{color}█{reset}")
+        
+        return bar
+    
+    def _output_status(self):
+        """Display current timer status."""
+        with self.state_lock:
+            remaining = self.state.remaining_time
+            is_active = self.state.is_active
+        
+        terminal_height = os.get_terminal_size().lines
+        available_lines = terminal_height - 1
+        
+        status_icon = "●" if is_active else "○"
+        percentage = (remaining / TIMER_MAX_SECONDS) * 100
+        time_str = format_time(remaining)
+        
+        header = [f"{time_str} ({percentage:.1f}%)", status_icon]
+        bar_height = max(1, available_lines - len(header))
+        mana_bar = self._create_mana_bar(remaining, TIMER_MAX_SECONDS, bar_height)
+        
+        output = "\n".join(header + mana_bar)
+        lines_to_move_up = len(header) + bar_height - 1
+        
+        print(output, end='', flush=True)
+        print(f"\033[{lines_to_move_up}A\r", end='', flush=True)
+    
+    def run(self):
+        """Execute the main timer loop."""
+        while True:
+            current_loop_time = time.time()
+            time_since_last_loop = current_loop_time - self.last_loop_time
+            
+            if self._update_state(current_loop_time, time_since_last_loop):
+                sys.exit(0)
+            
+            remaining_fraction = self.state.remaining_time / TIMER_MAX_SECONDS
+            self._apply_adjustments(remaining_fraction, current_loop_time)
+            self._output_status()
+
+            if current_loop_time - self.last_save_time >= SAVE_INTERVAL_SECONDS:
+                save_state_to_file(self.state)
+                self.last_save_time = current_loop_time
+
+            self.last_loop_time = current_loop_time
+            time.sleep(1)
 
 
 def parse_arguments():
@@ -210,221 +327,59 @@ def parse_arguments():
         default=None,
         help="Starting remaining time in minutes (default: 60 minutes = 1 hour)."
     )
-    parser.add_argument(
-        "--daily-work-limit",
-        type=float,
-        default=None,
-        help="Daily work limit in hours (default: 8). Once exceeded, system will shutdown after grace period."
-    )
     return parser.parse_args()
+
+def initialize_state(args):
+    """Initialize timer state from file or create new state.
+    
+    Args:
+        args: Parsed command-line arguments
+        
+    Returns:
+        Initialized TimerState instance
+    """
+    state = load_state_from_file() or TimerState(remaining_time=TIMER_MAX_SECONDS)
+    
+    saved_time = state.remaining_time
+    
+    if args.start_minutes is not None:
+        new_time = min(args.start_minutes * SECONDS_PER_MINUTE, TIMER_MAX_SECONDS)
+        state.remaining_time = new_time
+    else:
+        state.remaining_time = min(saved_time, TIMER_MAX_SECONDS)
+    
+    state.is_active = True
+    state.elapsed_since_last_activity = 0.0
+    
+    return state
 
 def main():
     """Main function to run the countdown timer."""
-    global last_activity_time, activity_detection_running
     args = parse_arguments()
 
-    daily_work_limit_seconds = (args.daily_work_limit * 60 * 60) if args.daily_work_limit is not None else DAILY_WORK_LIMIT_SECONDS_DEFAULT
-    
-    print("Countdown Timer Started")
-    print(f"Timer starts at: 1 hour (3600 seconds)")
-    print(f"Daily work limit: {daily_work_limit_seconds / 3600:.1f} hours")
-    if args.start_minutes is not None:
-        print(f"Starting with {args.start_minutes} minutes")
-    print("Using system-wide activity detection (works across all screens/workspaces)")
+    state = initialize_state(args)
 
-    state = load_state_from_file()
-    if not state:
-        print("No valid saved state found, starting fresh.")
-        state = {
-            "remaining_time": TIMER_MAX_SECONDS,
-            "daily_work_totals": {}
-        }
-        if args.start_minutes is not None:
-            state["remaining_time"] = min(args.start_minutes * 60.0, TIMER_MAX_SECONDS)
-            print(f"Starting with {args.start_minutes} minutes remaining")
-    else:
-        original_time = state["remaining_time"] / 60.0
-        
-        if "current_mode" in state:
-            del state["current_mode"]
-        
-        if args.start_minutes is not None:
-            state["remaining_time"] = min(args.start_minutes * 60.0, TIMER_MAX_SECONDS)
-            print(f"Overriding saved time ({original_time:.1f} min) with {args.start_minutes} minutes")
-        else:
-            state["remaining_time"] = min(state.get("remaining_time", TIMER_MAX_SECONDS), TIMER_MAX_SECONDS)
-            print(f"Loaded saved state: {state['remaining_time'] / 60.0:.1f} minutes remaining")
-    
-    state["is_active"] = True 
-    state["elapsed_since_last_activity"] = 0.0
-
-    last_activity_time = time.time()
-
-    # Start background activity monitoring threads
-    activity_detection_running = True
-    
-    # Start libinput monitor thread
-    libinput_thread = threading.Thread(target=libinput_monitor_thread, daemon=True)
-    libinput_thread.start()
+    activity_monitor = ActivityMonitor()
+    activity_monitor.start()
 
     save_original_sensitivity()
 
-    last_save_time = time.time()
-    last_adjustment_time = time.time()
-    # Harmonized handling: treat both system sleep and powered-off downtime as the same gap
     offline_duration_seconds = compute_offline_duration_seconds(state)
     gap = offline_duration_seconds if offline_duration_seconds > 0 else 0.0
-    # Seed both the loop baseline and last activity with the gap so the first iteration
-    # applies the entire downtime as idle, and the UI reflects accurate 'Last Activity'
     if gap > 0:
-        last_activity_time = time.time() - gap
-        last_loop_time = time.time() - gap
-    else:
-        last_loop_time = time.time()
-    loop_counter = 0
-    
-    # Activity detection threshold - used for both idle detection and sleep detection
-    ACTIVITY_THRESHOLD_SECONDS = 60
-    
-    # Check for existing shutdown trigger on startup
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    total_work_today = state["daily_work_totals"].get(today_str, 0)
-    shutdown_time = check_and_set_shutdown_trigger(total_work_today, daily_work_limit_seconds)
-    if shutdown_time:
-        time_until_shutdown = shutdown_time - time.time()
-        if time_until_shutdown <= 0:
-            # If time has already passed, shutdown immediately
-            execute_shutdown(daily_work_limit_seconds)
-            sys.exit(0)
-        else:
-            limit_hours = daily_work_limit_seconds / 3600
-            print(f"\nWARNING: Shutdown scheduled in {int(time_until_shutdown)} seconds!")
-            print(f"{limit_hours:.0f}-hour work limit has been exceeded.\n")
+        activity_monitor.set_last_activity_time(time.time() - gap)
 
     try:
-        while True:
-            current_loop_time = time.time()
-            time_since_last_loop = current_loop_time - last_loop_time
-            
-            # Check shutdown trigger at every iteration (in case script was killed and restarted)
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            total_work_today = state["daily_work_totals"].get(today_str, 0)
-            shutdown_time = check_and_set_shutdown_trigger(total_work_today, daily_work_limit_seconds)
-            if shutdown_time and time.time() >= shutdown_time:
-                print("\n" * 5)
-                execute_shutdown(daily_work_limit_seconds)
-                sys.exit(0)
-            
-            # Mutate state under lock
-            with state_lock:
-                today_str = datetime.now().strftime('%Y-%m-%d') # Get current date string
-                state["elapsed_since_last_activity"] = current_loop_time - last_activity_time
-                state["is_active"] = state["elapsed_since_last_activity"] <= ACTIVITY_THRESHOLD_SECONDS
-                
-                # If we've been away for longer than the threshold, treat it as a gap
-                # (covers both system sleep and powered-off downtime) and force idle
-                if time_since_last_loop > ACTIVITY_THRESHOLD_SECONDS:
-                    print(f"\nResumed after {time_since_last_loop:.1f} seconds (sleep or downtime)")
-                    # Align last activity with the start of the gap so the UI reflects it
-                    last_activity_time = current_loop_time - time_since_last_loop
-                    state["elapsed_since_last_activity"] = time_since_last_loop
-                    state["is_active"] = False
-                
-                if state["is_active"]:
-                    state["remaining_time"] -= time_since_last_loop
-                    current_day_total = state["daily_work_totals"].get(today_str, 0)
-                    state["daily_work_totals"][today_str] = current_day_total + time_since_last_loop
-                    
-                    new_total = state["daily_work_totals"][today_str]
-                    shutdown_time = check_and_set_shutdown_trigger(new_total, daily_work_limit_seconds)
-                    if shutdown_time and time.time() >= shutdown_time:
-                        print("\n" * 5)
-                        execute_shutdown(daily_work_limit_seconds)
-                        sys.exit(0)
-                else:
-                    state["remaining_time"] += time_since_last_loop
-                    state["remaining_time"] = min(state["remaining_time"], TIMER_MAX_SECONDS)
-
-                if state["remaining_time"] <= 0:
-                    print("\n" * 5)
-                    print("="*60)
-                    print("⚠️  TIMER REACHED ZERO ⚠️")
-                    print("Shutting down system...")
-                    print("="*60)
-                    execute_shutdown(daily_work_limit_seconds)
-                    sys.exit(0)
-                
-                remaining_time_snapshot = state["remaining_time"]
-            
-            remaining_fraction = remaining_time_snapshot / TIMER_MAX_SECONDS
-            
-            if current_loop_time - last_adjustment_time >= 10:
-                brightness_percentage = set_brightness_by_fraction(remaining_fraction, TIMER_MAX_SECONDS)
-                sensitivity = set_sensitivity_by_fraction(remaining_fraction, TIMER_MAX_SECONDS)
-                
-                print(f"\n[Adjustment] Brightness: {brightness_percentage}%, Mouse Sensitivity: {sensitivity:.2f}")
-                
-                last_adjustment_time = current_loop_time
-            
-            output(state, args, daily_work_limit_seconds)
-
-            if current_loop_time - last_save_time >= SAVE_INTERVAL_SECONDS:
-                save_state_to_file(state)
-                last_save_time = current_loop_time
-
-            last_loop_time = current_loop_time
-            loop_counter += 1
-            time.sleep(1)
+        timer_loop = TimerLoop(state, args, offline_duration_seconds, activity_monitor)
+        timer_loop.run()
 
     except KeyboardInterrupt:
-        print(" " * 120, end='\r') 
-        print("\nCountdown Timer stopped.")
         save_state_to_file(state)
     except Exception as e:
-        print(f"\nUnexpected error: {e}")
         raise 
     finally:
-        activity_detection_running = False
-        if libinput_process:
-            libinput_process.terminate()
-        print("Activity monitoring stopped.")
+        activity_monitor.stop()
         restore_original_sensitivity()
-
-def output(state, args, daily_work_limit_seconds):
-    """Handles all per-second console output.
-    
-    Args:
-        state: Current timer state
-        args: Command-line arguments
-        daily_work_limit_seconds: Daily work limit in seconds
-    """
-    with state_lock:
-        remaining_time_val = state.get("remaining_time", 0)
-        elapsed_activity_val = state.get("elapsed_since_last_activity", 0)
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        total_work_val = state["daily_work_totals"].get(today_str, 0)
-    
-    remaining_seconds = int(max(0, remaining_time_val))
-    remaining_minutes = remaining_seconds // 60
-    remaining_secs = remaining_seconds % 60
-    display_time_str = f"{remaining_minutes}:{remaining_secs:02d}"
-    
-    elapsed_minutes, elapsed_seconds = divmod(int(elapsed_activity_val), 60)
-    activity_info = f"{elapsed_minutes:02d}:{elapsed_seconds:02d} Last Activity"
-
-    hours, remainder = divmod(max(0, total_work_val), 3600)
-    minutes, _ = divmod(remainder, 60)
-    total_work_time_str = f"{int(hours):02d}:{int(minutes):02d} Total Work Today"
-    
-    activity_status = "Active" if state.get("is_active", True) else "Idle"
-
-    output_str = (
-        f"\n\n{activity_status}\n"
-        f"{activity_info}\n"
-        f"{total_work_time_str}\n"
-        f"{display_time_str} Time Left"
-    )
-    print(output_str, end='')
 
 if __name__ == "__main__":
     main() 
