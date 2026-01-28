@@ -1,47 +1,86 @@
 import os
 import re
 
-CONFIG_FILE = os.path.expanduser("~/.config/cosmic/com.system76.CosmicComp/v1/input_default")
-_original_sensitivity = None
+CONFIG_DEFAULT_FILE = os.path.expanduser(
+    "~/.config/cosmic/com.system76.CosmicComp/v1/input_default"
+)
+CONFIG_TOUCHPAD_FILE = os.path.expanduser(
+    "~/.config/cosmic/com.system76.CosmicComp/v1/input_touchpad"
+)
 
-def get_current_sensitivity():
-    """Get current speed value from Pop OS config file."""
-    if not os.path.exists(CONFIG_FILE):
-        raise RuntimeError(f"Config file not found: {CONFIG_FILE}")
-    
-    with open(CONFIG_FILE, 'r') as f:
+CONFIG_FILES = (CONFIG_DEFAULT_FILE, CONFIG_TOUCHPAD_FILE)
+
+_original_sensitivity = {}
+
+
+def _read_speed_from_file(path):
+    """Return current speed value from a given COSMIC input config file, or None."""
+    if not os.path.exists(path):
+        return None
+
+    with open(path, "r") as f:
         content = f.read()
-    
-    match = re.search(r'speed:\s*(-?[\d.]+)', content)
+
+    match = re.search(r"speed:\s*(-?[\d.]+)", content)
     if not match:
-        raise RuntimeError("Could not find speed value in config file")
-    
+        return None
+
     return round(float(match.group(1)), 2)
 
-def set_sensitivity(value):
-    """Set speed value in Pop OS config file (range -1.0 to 1.0)."""
-    value = round(max(-1.0, min(1.0, value)), 2)
-    
-    if not os.path.exists(CONFIG_FILE):
-        raise RuntimeError(f"Config file not found: {CONFIG_FILE}")
-    
-    with open(CONFIG_FILE, 'r') as f:
+
+def _write_speed_to_file(path, value):
+    """Write speed value into a given COSMIC input config file if present."""
+    if not os.path.exists(path):
+        return
+
+    with open(path, "r") as f:
         content = f.read()
-    
-    content = re.sub(r'speed:\s*-?[\d.]+', f'speed: {value}', content)
-    
-    with open(CONFIG_FILE, 'w') as f:
+
+    if "speed:" not in content:
+        return
+
+    content = re.sub(r"speed:\s*-?[\d.]+", f"speed: {value}", content)
+
+    with open(path, "w") as f:
         f.write(content)
 
+
+def get_current_sensitivity():
+    """Get current speed value from the default Pop OS input config."""
+    value = _read_speed_from_file(CONFIG_DEFAULT_FILE)
+    if value is None:
+        raise RuntimeError(f"Could not read speed from {CONFIG_DEFAULT_FILE}")
+    return value
+
+
+def set_sensitivity(value):
+    """Set speed value in all COSMIC input configs (range -1.0 to 1.0)."""
+    value = round(max(-1.0, min(1.0, value)), 2)
+
+    if not any(os.path.exists(p) for p in CONFIG_FILES):
+        raise RuntimeError(
+            "No COSMIC input config files found: "
+            + ", ".join(CONFIG_FILES)
+        )
+
+    for path in CONFIG_FILES:
+        _write_speed_to_file(path, value)
+
+
 def save_original_sensitivity():
-    """Store original sensitivity value from config file."""
+    """Store original sensitivity values for all known input config files."""
     global _original_sensitivity
-    _original_sensitivity = get_current_sensitivity()
+    _original_sensitivity = {}
+    for path in CONFIG_FILES:
+        value = _read_speed_from_file(path)
+        if value is not None:
+            _original_sensitivity[path] = value
+
 
 def restore_original_sensitivity():
-    """Restore saved sensitivity value."""
-    if _original_sensitivity is not None:
-        set_sensitivity(_original_sensitivity)
+    """Restore saved sensitivity values for all known input config files."""
+    for path, value in _original_sensitivity.items():
+        _write_speed_to_file(path, value)
 
 def set_sensitivity_by_fraction(fraction, max_time_seconds):
     """Set sensitivity based on remaining time fraction.

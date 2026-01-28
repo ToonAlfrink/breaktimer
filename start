@@ -4,13 +4,12 @@
 # This script automatically starts the Pomodoro timer in a terminal window
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="$SCRIPT_DIR/autostart.log"
 # Wait for the desktop environment to fully load
 sleep 10
 
 # Change to the script directory
 cd "$SCRIPT_DIR" || {
-    echo "$(date): Failed to change to breaktimer directory" >> "$LOG_FILE"
+    echo "Failed to change to breaktimer directory" >&2
     exit 1
 }
 
@@ -20,11 +19,11 @@ launch_cosmic_term() {
         --title="Pomodoro Timer" \
         --working-directory="$SCRIPT_DIR" \
         -- bash -c "
-            python3 pomodoro.py || {
+            python3 main.py || {
                 echo 'Pomodoro script failed. Press Enter to close.';
                 read;
             }
-        " >> "$LOG_FILE" 2>&1
+        "
 }
 
 # Function to launch with gnome-terminal as fallback
@@ -44,24 +43,19 @@ launch_gnome_terminal() {
         --title="Pomodoro Timer" \
         --working-directory="$SCRIPT_DIR" \
         -- bash -c "
-            python3 pomodoro.py || {
+            python3 main.py || {
                 echo 'Pomodoro script failed. Press Enter to close.';
                 read;
             }
-        " >> "$LOG_FILE" 2>&1
+        "
 }
 
 # Try cosmic-term first, then fallback to gnome-terminal
 if command -v cosmic-term >/dev/null 2>&1; then
-    echo "$(date): Attempting to launch with cosmic-term" >> "$LOG_FILE"
     launch_cosmic_term
     if [ $? -ne 0 ]; then
-        echo "$(date): cosmic-term failed, trying gnome-terminal" >> "$LOG_FILE"
         launch_gnome_terminal
     fi
 else
-    echo "$(date): cosmic-term not found, using gnome-terminal" >> "$LOG_FILE"
     launch_gnome_terminal
 fi
-
-echo "$(date): Pomodoro Timer launch completed" >> "$LOG_FILE"
