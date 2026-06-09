@@ -46,9 +46,6 @@ def today_str():
     """Returns today's date as YYYY-MM-DD string."""
     return datetime.now().strftime('%Y-%m-%d')
 
-def seconds_to_hours(seconds):
-    """Convert seconds to hours."""
-    return seconds / SECONDS_PER_HOUR
 
 def format_time(seconds):
     """Format seconds as MM:SS."""
@@ -167,10 +164,12 @@ class TimerLoop:
     ACTIVITY_THRESHOLD_SECONDS = SECONDS_PER_MINUTE
     ADJUSTMENT_INTERVAL_SECONDS = 10
     
-    def __init__(self, state, args, offline_duration_seconds, activity_monitor):
+    def __init__(self, state, args, offline_duration_seconds, activity_monitor, mana_max_seconds, mana_replenish_seconds):
         self.state = state
         self.args = args
         self.activity_monitor = activity_monitor
+        self.mana_max_seconds = mana_max_seconds
+        self.mana_replenish_seconds = mana_replenish_seconds
         self.last_loop_time = time.time() - offline_duration_seconds if offline_duration_seconds > 0 else time.time()
         self.last_save_time = time.time()
         self.last_adjustment_time = time.time()
@@ -197,8 +196,8 @@ class TimerLoop:
             current_day_total = self.state.daily_work_totals.get(today, 0)
             self.state.daily_work_totals[today] = current_day_total + time_since_last_loop
         else:
-            self.state.remaining_time += time_since_last_loop
-            self.state.remaining_time = min(self.state.remaining_time, TIMER_MAX_SECONDS)
+            self.state.remaining_time += time_since_last_loop * (self.mana_max_seconds / self.mana_replenish_seconds)
+            self.state.remaining_time = min(self.state.remaining_time, self.mana_max_seconds)
     
     def _check_shutdown(self):
         """Check if timer reached zero and trigger shutdown if needed."""
@@ -225,36 +224,65 @@ class TimerLoop:
     def _apply_adjustments(self, remaining_fraction, current_loop_time):
         """Apply brightness and sensitivity adjustments if interval has elapsed."""
         if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
-            set_brightness_by_fraction(remaining_fraction, TIMER_MAX_SECONDS)
-            set_sensitivity_by_fraction(remaining_fraction, TIMER_MAX_SECONDS)
+            set_brightness_by_fraction(remaining_fraction, self.mana_max_seconds)
+            set_sensitivity_by_fraction(remaining_fraction, self.mana_max_seconds)
             self.last_adjustment_time = current_loop_time
     
-    def _get_color_for_fraction(self, fraction):
-        """Get ANSI color code with smooth gradient from blue to green to yellow to red to black."""
-        fraction = max(0.0, min(1.0, fraction))
-        
-        if fraction > 0.75:
-            t = (1.0 - fraction) / 0.25
-            r = 0
-            g = int(t * 255)
-            b = int(255 - t * 255)
-        elif fraction >= 0.5:
-            t = (0.75 - fraction) / 0.25
-            r = int(t * 255)
-            g = 255
-            b = 0
-        elif fraction > 0.25:
-            t = (0.5 - fraction) / 0.25
-            r = 255
-            g = int((1 - t) * 255)
-            b = 0
+    _SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+    def _format_history_line(self):
+        """One line: today's hours, 7-day avg with delta, 28-day sparkline."""
+        totals = self.state.daily_work_totals
+        today = today_str()
+        past_days = sorted(d for d in totals if d < today)
+
+        today_h = totals.get(today, 0) / 3600
+        week = past_days[-7:]
+        avg_7d = sum(totals[d] for d in week) / len(week) / 3600 if week else 0
+
+        spark_days = past_days[-28:]
+        if spark_days:
+            vals = [totals[d] for d in spark_days]
+            lo, hi = min(vals), max(vals)
+            if hi > lo:
+                spark = "".join(
+                    self._SPARK_CHARS[min(7, int((v - lo) / (hi - lo) * 8))]
+                    for v in vals
+                )
+            else:
+                spark = self._SPARK_CHARS[4] * len(spark_days)
         else:
-            t = (0.25 - fraction) / 0.25
-            r = int((1 - t) * 255)
-            g = 0
-            b = 0
-        
-        return f"\033[38;2;{r};{g};{b}m"
+            spark = ""
+
+        parts = [f"{today_h:.1f}h today"]
+        if avg_7d:
+            diff = today_h - avg_7d
+            sign = "+" if diff >= 0 else ""
+            parts.append(f"avg {avg_7d:.1f}h  {sign}{diff:.1f}h")
+        if spark:
+            parts.append(spark)
+        return "  ".join(parts)
+
+    _COLOR_STOPS = (  # (fraction, r, g, b) — blue → cyan → yellow → red → black
+        (0.00, 0, 0, 0),
+        (0.25, 255, 0, 0),
+        (0.50, 255, 255, 0),
+        (0.75, 0, 255, 255),
+        (1.00, 0, 0, 255),
+    )
+
+    def _get_color_for_fraction(self, fraction):
+        fraction = max(0.0, min(1.0, fraction))
+        for i in range(len(self._COLOR_STOPS) - 1):
+            lo, r0, g0, b0 = self._COLOR_STOPS[i]
+            hi, r1, g1, b1 = self._COLOR_STOPS[i + 1]
+            if lo <= fraction <= hi:
+                t = (fraction - lo) / (hi - lo)
+                r = int(r0 + t * (r1 - r0))
+                g = int(g0 + t * (g1 - g0))
+                b = int(b0 + t * (b1 - b0))
+                return f"\033[38;2;{r};{g};{b}m"
+        return "\033[38;2;0;0;255m"
     
     def _create_mana_bar(self, remaining, max_time, bar_height):
         """Create a visual mana bar showing remaining time."""
@@ -284,12 +312,15 @@ class TimerLoop:
         available_lines = terminal_height - 1
         
         status_icon = "●" if is_active else "○"
-        percentage = (remaining / TIMER_MAX_SECONDS) * 100
+        percentage = (remaining / self.mana_max_seconds) * 100
         time_str = format_time(remaining)
-        
-        header = [f"{time_str} ({percentage:.1f}%)", status_icon]
+
+        header = [
+            f"{time_str} ({percentage:.1f}%) {status_icon}",
+            self._format_history_line(),
+        ]
         bar_height = max(1, available_lines - len(header))
-        mana_bar = self._create_mana_bar(remaining, TIMER_MAX_SECONDS, bar_height)
+        mana_bar = self._create_mana_bar(remaining, self.mana_max_seconds, bar_height)
         
         output = "\n".join(header + mana_bar)
         lines_to_move_up = len(header) + bar_height - 1
@@ -306,7 +337,7 @@ class TimerLoop:
             if self._update_state(current_loop_time, time_since_last_loop):
                 sys.exit(0)
             
-            remaining_fraction = self.state.remaining_time / TIMER_MAX_SECONDS
+            remaining_fraction = self.state.remaining_time / self.mana_max_seconds
             self._apply_adjustments(remaining_fraction, current_loop_time)
             self._output_status()
 
@@ -327,26 +358,39 @@ def parse_arguments():
         default=None,
         help="Starting remaining time in minutes (default: 60 minutes = 1 hour)."
     )
+    parser.add_argument(
+        "--deplete-minutes",
+        type=float,
+        default=60,
+        help="Bar cap and minutes to deplete from full (X)."
+    )
+    parser.add_argument(
+        "--replenish-minutes",
+        type=float,
+        default=20,
+        help="Minutes to replenish from empty to full (Y)."
+    )
     return parser.parse_args()
 
-def initialize_state(args):
+def initialize_state(args, mana_max_seconds):
     """Initialize timer state from file or create new state.
     
     Args:
         args: Parsed command-line arguments
+        mana_max_seconds: Bar cap (X); remaining_time is clamped to this.
         
     Returns:
         Initialized TimerState instance
     """
-    state = load_state_from_file() or TimerState(remaining_time=TIMER_MAX_SECONDS)
+    state = load_state_from_file() or TimerState(remaining_time=mana_max_seconds)
     
     saved_time = state.remaining_time
     
     if args.start_minutes is not None:
-        new_time = min(args.start_minutes * SECONDS_PER_MINUTE, TIMER_MAX_SECONDS)
+        new_time = min(args.start_minutes * SECONDS_PER_MINUTE, mana_max_seconds)
         state.remaining_time = new_time
     else:
-        state.remaining_time = min(saved_time, TIMER_MAX_SECONDS)
+        state.remaining_time = min(saved_time, mana_max_seconds)
     
     state.is_active = True
     state.elapsed_since_last_activity = 0.0
@@ -356,8 +400,10 @@ def initialize_state(args):
 def main():
     """Main function to run the countdown timer."""
     args = parse_arguments()
+    mana_max_seconds = args.deplete_minutes * SECONDS_PER_MINUTE
+    mana_replenish_seconds = args.replenish_minutes * SECONDS_PER_MINUTE
 
-    state = initialize_state(args)
+    state = initialize_state(args, mana_max_seconds)
 
     activity_monitor = ActivityMonitor()
     activity_monitor.start()
@@ -365,18 +411,22 @@ def main():
     save_original_sensitivity()
 
     offline_duration_seconds = compute_offline_duration_seconds(state)
-    gap = offline_duration_seconds if offline_duration_seconds > 0 else 0.0
-    if gap > 0:
-        activity_monitor.set_last_activity_time(time.time() - gap)
+    if offline_duration_seconds > 0:
+        activity_monitor.set_last_activity_time(time.time() - offline_duration_seconds)
 
     try:
-        timer_loop = TimerLoop(state, args, offline_duration_seconds, activity_monitor)
+        timer_loop = TimerLoop(
+            state,
+            args,
+            offline_duration_seconds,
+            activity_monitor,
+            mana_max_seconds,
+            mana_replenish_seconds,
+        )
         timer_loop.run()
 
     except KeyboardInterrupt:
         save_state_to_file(state)
-    except Exception as e:
-        raise 
     finally:
         activity_monitor.stop()
         restore_original_sensitivity()
