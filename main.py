@@ -166,10 +166,11 @@ def execute_shutdown():
 
 class TimerLoop:
     """Encapsulates the main timer loop logic, following Single Responsibility Principle."""
-    
+
     ACTIVITY_THRESHOLD_SECONDS = SECONDS_PER_MINUTE
     ADJUSTMENT_INTERVAL_SECONDS = 10
-    
+    GRACE_SECONDS = 60
+
     def __init__(self, state, args, offline_duration_seconds, activity_monitor, mana_max_seconds, mana_replenish_seconds):
         self.state = state
         self.args = args
@@ -181,6 +182,7 @@ class TimerLoop:
         self.last_adjustment_time = time.time()
         self.state_lock = threading.Lock()
         self.previous_output_lines = 0
+        self.grace_start = None
     
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
         """Update activity detection status based on user input."""
@@ -206,10 +208,18 @@ class TimerLoop:
             self.state.remaining_time = min(self.state.remaining_time, self.mana_max_seconds)
     
     def _check_shutdown(self):
-        """Check if timer reached zero and trigger shutdown if needed."""
+        """Check if timer reached zero; enter grace window, then shutdown."""
         if self.state.remaining_time <= 0:
-            execute_shutdown()
-            return True
+            self.state.remaining_time = 0.0
+            now = time.time()
+            if self.grace_start is None:
+                self.grace_start = now
+            if now - self.grace_start >= self.GRACE_SECONDS:
+                execute_shutdown()
+                return True
+        else:
+            # Timer refilled (user went idle) — cancel any active grace window
+            self.grace_start = None
         return False
     
     def _update_state(self, current_loop_time, time_since_last_loop):
@@ -308,18 +318,38 @@ class TimerLoop:
         
         return bar
     
+    _RESET = "\033[0m"
+    _BOLD_RED = "\033[1;31m"
+    _RED = "\033[31m"
+    _YELLOW = "\033[33m"
+
+    def _warning_line(self, remaining):
+        """Return a warning line string if the timer is in a critical state, else empty string."""
+        if self.grace_start is not None:
+            grace_elapsed = time.time() - self.grace_start
+            grace_remaining = max(0, self.GRACE_SECONDS - grace_elapsed)
+            return (
+                f"{self._BOLD_RED}  SHUTTING DOWN IN {format_time(grace_remaining)}"
+                f"  — stop typing to cancel{self._RESET}"
+            )
+        if remaining < 2 * SECONDS_PER_MINUTE:
+            return f"{self._RED}⚠  {format_time(remaining)} remaining — save your work{self._RESET}"
+        if remaining < 5 * SECONDS_PER_MINUTE:
+            return f"{self._YELLOW}⚠  {format_time(remaining)} remaining — wrap up soon{self._RESET}"
+        return ""
+
     def _output_status(self):
         """Display current timer status."""
         with self.state_lock:
             remaining = self.state.remaining_time
             is_active = self.state.is_active
-        
+
         try:
             terminal_height = os.get_terminal_size().lines
         except OSError:
             terminal_height = 24
         available_lines = terminal_height - 1
-        
+
         status_icon = "●" if is_active else "○"
         percentage = (remaining / self.mana_max_seconds) * 100
         time_str = format_time(remaining)
@@ -328,6 +358,9 @@ class TimerLoop:
             f"{time_str} ({percentage:.1f}%) {status_icon}",
             self._format_history_line(),
         ]
+        warning = self._warning_line(remaining)
+        if warning:
+            header.append(warning)
         bar_height = max(1, available_lines - len(header))
         mana_bar = self._create_mana_bar(remaining, self.mana_max_seconds, bar_height)
         
