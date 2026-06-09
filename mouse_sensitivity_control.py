@@ -54,17 +54,15 @@ def get_current_sensitivity():
 
 
 def set_sensitivity(value):
-    """Set speed value in all COSMIC input configs (range -1.0 to 1.0)."""
+    """Set speed value in all COSMIC input configs (range -1.0 to 1.0). Returns False if no config files found."""
     value = round(max(-1.0, min(1.0, value)), 2)
 
     if not any(os.path.exists(p) for p in CONFIG_FILES):
-        raise RuntimeError(
-            "No COSMIC input config files found: "
-            + ", ".join(CONFIG_FILES)
-        )
+        return False
 
     for path in CONFIG_FILES:
         _write_speed_to_file(path, value)
+    return True
 
 
 def save_original_sensitivity():
@@ -83,15 +81,7 @@ def restore_original_sensitivity():
         _write_speed_to_file(path, value)
 
 def set_sensitivity_by_fraction(fraction, max_time_seconds):
-    """Set sensitivity based on remaining time fraction.
-    
-    Args:
-        fraction: Remaining time as a fraction of max_time_seconds (0.0 to 1.0)
-        max_time_seconds: Maximum timer value in seconds
-    
-    Returns:
-        The sensitivity value that was set (-1.0 to 1.0)
-    """
+    """Set sensitivity based on remaining time fraction (0.0 to 1.0)."""
     sensitivity = -1.0 + (fraction * 2.0)
     sensitivity = max(-1.0, min(1.0, sensitivity))
     set_sensitivity(sensitivity)

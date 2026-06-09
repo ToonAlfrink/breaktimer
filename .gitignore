@@ -1,2 +1,4 @@
 state.json
 shutdown_trigger.json
+pomodoro_state.json
+state.sync-conflict-*.json

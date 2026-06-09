@@ -108,7 +108,7 @@ class ActivityMonitor:
                         self.last_activity_time = time.time()
                     
         except Exception as e:
-            pass
+            print(f"\nWARNING: activity monitor failed: {e}", file=sys.stderr)
         finally:
             if self.libinput_process:
                 self.libinput_process.terminate()
@@ -124,12 +124,16 @@ def save_state_to_file(state):
         json.dump(state_to_save, f, indent=4)
 
 def load_state_from_file():
-    """Loads the state from a JSON file. Returns None if file not found or error."""
-    if os.path.exists(STATE_FILE):
+    """Loads the state from a JSON file. Returns None if file not found or corrupt."""
+    if not os.path.exists(STATE_FILE):
+        return None
+    try:
         with open(STATE_FILE, 'r') as f:
             data = json.load(f)
-            return TimerState.from_dict(data)
-    return None
+        return TimerState.from_dict(data)
+    except (json.JSONDecodeError, ValueError, KeyError) as e:
+        print(f"WARNING: could not read state file ({e}), starting fresh", file=sys.stderr)
+        return None
 
 def compute_offline_duration_seconds(state):
     """Compute time elapsed since the last persisted state, used to treat downtime as idle.
@@ -143,19 +147,21 @@ def compute_offline_duration_seconds(state):
     return max(0.0, time.time() - saved_epoch) if saved_epoch else 0.0
 
 def execute_shutdown():
-    """Execute system shutdown command."""
+    """Execute system shutdown command. Logs to stderr if all attempts fail."""
     shutdown_commands = [
         ['sudo', '-n', 'shutdown', '-h', 'now'],
         ['shutdown', '-h', 'now'],
         ['systemctl', 'poweroff']
     ]
-    
+
     for cmd in shutdown_commands:
         try:
             subprocess.run(cmd, check=True)
             return
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, FileNotFoundError):
             continue
+
+    print("ERROR: all shutdown commands failed — timer expired but machine is still on", file=sys.stderr)
 
 
 class TimerLoop:
@@ -308,7 +314,10 @@ class TimerLoop:
             remaining = self.state.remaining_time
             is_active = self.state.is_active
         
-        terminal_height = os.get_terminal_size().lines
+        try:
+            terminal_height = os.get_terminal_size().lines
+        except OSError:
+            terminal_height = 24
         available_lines = terminal_height - 1
         
         status_icon = "●" if is_active else "○"
