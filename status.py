@@ -9,6 +9,8 @@ import fcntl
 import json
 import os
 import time
+from collections import defaultdict
+from datetime import datetime
 
 SECONDS_PER_MINUTE = 60
 
@@ -57,11 +59,57 @@ def acquire_singleton_lock(name):
         return None
 
 
+def today_str():
+    return datetime.now().strftime('%Y-%m-%d')
+
+
 def format_time(seconds):
     """Format seconds as M:SS."""
     seconds = int(max(0, seconds))
     minutes, secs = divmod(seconds, SECONDS_PER_MINUTE)
     return f"{minutes}:{secs:02d}"
+
+
+_SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+
+def format_history_line(daily_work_totals):
+    """One line: today's hours, 7-day avg with delta, 12-month sparkline."""
+    totals = daily_work_totals
+    today = today_str()
+    today_month = today[:7]
+    past_days = sorted(d for d in totals if d < today)
+
+    today_h = totals.get(today, 0) / 3600
+    week = past_days[-7:]
+    avg_7d = sum(totals[d] for d in week) / len(week) / 3600 if week else 0
+
+    monthly = defaultdict(float)
+    for d, v in totals.items():
+        if d[:7] != today_month:
+            monthly[d[:7]] += v
+    past_months = sorted(monthly)[-12:]
+    if past_months:
+        vals = [monthly[m] for m in past_months]
+        lo, hi = min(vals), max(vals)
+        if hi > lo:
+            spark = "".join(
+                _SPARK_CHARS[min(7, int((v - lo) / (hi - lo) * 8))]
+                for v in vals
+            )
+        else:
+            spark = _SPARK_CHARS[4] * len(past_months)
+    else:
+        spark = ""
+
+    parts = [f"{today_h:.1f}h today"]
+    if avg_7d:
+        diff = today_h - avg_7d
+        sign = "+" if diff >= 0 else ""
+        parts.append(f"avg {avg_7d:.1f}h  {sign}{diff:.1f}h")
+    if spark:
+        parts.append(spark)
+    return "  ".join(parts)
 
 
 # Shared mana-bar palette: bar fraction → colour (black → red → yellow → cyan → blue).

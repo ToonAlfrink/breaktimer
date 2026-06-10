@@ -94,5 +94,49 @@ class TestColorForFraction(unittest.TestCase):
         self.assertEqual(status.color_for_fraction(-0.5), (0, 0, 0))
 
 
+class TestFormatHistoryLine(unittest.TestCase):
+    def _line(self, totals):
+        return status.format_history_line(totals)
+
+    def test_empty_history_shows_today_only(self):
+        self.assertIn("today", self._line({}))
+        self.assertNotIn("avg", self._line({}))
+
+    def test_today_only_no_avg_no_spark(self):
+        line = self._line({status.today_str(): 3600})
+        self.assertIn("today", line)
+        self.assertNotIn("avg", line)
+
+    def test_past_days_include_avg(self):
+        line = self._line({"2026-01-01": 7200, status.today_str(): 3600})
+        self.assertIn("avg", line)
+
+    def test_flat_spark_uses_mid_character(self):
+        past = {f"2026-01-{d:02d}": 3600 for d in range(1, 10)}
+        self.assertIn("▅", self._line(past))
+
+    def test_below_avg_shows_negative_delta(self):
+        past = {f"2026-01-{d:02d}": 14400 for d in range(1, 8)}
+        self.assertIn("-", self._line({**past, status.today_str(): 1800}))
+
+    def test_above_avg_shows_plus_delta(self):
+        past = {f"2026-01-{d:02d}": 3600 for d in range(1, 8)}
+        self.assertIn("+", self._line({**past, status.today_str(): 14400}))
+
+    def test_monthly_sparkline_uses_month_totals(self):
+        totals = {"2026-01-01": 36 * 3600, "2026-02-01": 72 * 3600, status.today_str(): 0}
+        line = self._line(totals)
+        spark_chars = set("▁▂▃▄▅▆▇█")
+        found = [c for c in line if c in spark_chars]
+        self.assertEqual(len(found), 2)
+        self.assertNotEqual(found[0], found[1])
+
+    def test_current_month_excluded_from_sparkline(self):
+        today = status.today_str()
+        day1 = f"{today[:7]}-01"
+        line = self._line({day1: 7200, today: 3600})
+        self.assertFalse(any(c in line for c in "▁▂▃▄▅▆▇█"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,17 +5,11 @@ import os
 import subprocess
 import threading
 import sys
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
 import status
+from status import SECONDS_PER_MINUTE, today_str
 from brightness_control import set_brightness_by_fraction
 from mouse_sensitivity_control import set_sensitivity_by_fraction, save_original_sensitivity, restore_original_sensitivity
-
-SECONDS_PER_MINUTE = 60
-SECONDS_PER_HOUR = 3600
-
-TIMER_MAX_SECONDS = SECONDS_PER_HOUR
 
 STATE_FILE = "state.json"
 SAVE_INTERVAL_SECONDS = 10
@@ -23,13 +17,10 @@ SAVE_INTERVAL_SECONDS = 10
 
 @dataclass
 class TimerState:
-    """Timer state: the durable fields below persist to disk; the activity
-    fields are per-tick runtime status and are not saved."""
     remaining_time: float
     daily_work_totals: dict = field(default_factory=dict)
     last_saved_time: float = None
     is_active: bool = True
-    elapsed_since_last_activity: float = 0.0
 
     def to_dict(self):
         """The durable subset, for JSON persistence."""
@@ -43,15 +34,10 @@ class TimerState:
     def from_dict(cls, data):
         """Create from dictionary loaded from JSON."""
         return cls(
-            remaining_time=data.get("remaining_time", TIMER_MAX_SECONDS),
+            remaining_time=data.get("remaining_time", float("inf")),
             daily_work_totals=data.get("daily_work_totals", {}),
             last_saved_time=data.get("last_saved_time")
         )
-
-
-def today_str():
-    """Returns today's date as YYYY-MM-DD string."""
-    return datetime.now().strftime('%Y-%m-%d')
 
 
 class ActivityMonitor:
@@ -190,14 +176,13 @@ class TimerLoop:
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
         """Update activity detection status based on user input."""
         last_activity_time = self.activity_monitor.get_last_activity_time()
-        self.state.elapsed_since_last_activity = current_loop_time - last_activity_time
-        
+        elapsed = current_loop_time - last_activity_time
+
         if time_since_last_loop > self.ACTIVITY_THRESHOLD_SECONDS:
             self.activity_monitor.set_last_activity_time(current_loop_time - time_since_last_loop)
-            self.state.elapsed_since_last_activity = time_since_last_loop
             self.state.is_active = False
         else:
-            self.state.is_active = self.state.elapsed_since_last_activity <= self.ACTIVITY_THRESHOLD_SECONDS
+            self.state.is_active = elapsed <= self.ACTIVITY_THRESHOLD_SECONDS
     
     def _adjust_timer(self, time_since_last_loop):
         """Adjust remaining time based on activity status."""
@@ -240,47 +225,6 @@ class TimerLoop:
             set_sensitivity_by_fraction(remaining_fraction)
             self.last_adjustment_time = current_loop_time
     
-    _SPARK_CHARS = "▁▂▃▄▅▆▇█"
-
-    def _format_history_line(self):
-        """One line: today's hours, 7-day avg with delta, 12-month sparkline."""
-        totals = self.state.daily_work_totals
-        today = today_str()
-        today_month = today[:7]
-        past_days = sorted(d for d in totals if d < today)
-
-        today_h = totals.get(today, 0) / 3600
-        week = past_days[-7:]
-        avg_7d = sum(totals[d] for d in week) / len(week) / 3600 if week else 0
-
-        # Monthly totals, excluding the current (partial) month.
-        monthly = defaultdict(float)
-        for d, v in totals.items():
-            if d[:7] != today_month:
-                monthly[d[:7]] += v
-        past_months = sorted(monthly)[-12:]
-        if past_months:
-            vals = [monthly[m] for m in past_months]
-            lo, hi = min(vals), max(vals)
-            if hi > lo:
-                spark = "".join(
-                    self._SPARK_CHARS[min(7, int((v - lo) / (hi - lo) * 8))]
-                    for v in vals
-                )
-            else:
-                spark = self._SPARK_CHARS[4] * len(past_months)
-        else:
-            spark = ""
-
-        parts = [f"{today_h:.1f}h today"]
-        if avg_7d:
-            diff = today_h - avg_7d
-            sign = "+" if diff >= 0 else ""
-            parts.append(f"avg {avg_7d:.1f}h  {sign}{diff:.1f}h")
-        if spark:
-            parts.append(spark)
-        return "  ".join(parts)
-
     def _grace_remaining(self):
         """Seconds left in the shutdown grace window, or None if not in it."""
         if self.grace_start is None:
@@ -295,7 +239,7 @@ class TimerLoop:
                 "max_seconds": self.mana_max_seconds,
                 "is_active": self.state.is_active,
                 "grace_remaining": self._grace_remaining(),
-                "history": self._format_history_line(),
+                "history": status.format_history_line(self.state.daily_work_totals),
             }
         try:
             status.write_status(payload)
