@@ -56,7 +56,6 @@ cd ~/Projects/breaktimer
 
 ## Quality gaps
 
-- The ambient bar appears on the compositor-chosen output only (no multi-monitor story).
 - Hover-expansion is wired but was verified by code path, not by a real pointer.
 - `pomodoro_state.json` and `state.sync-conflict-*.json` on disk are stale Syncthing
   artifacts — gitignored, owner's data, leave them.

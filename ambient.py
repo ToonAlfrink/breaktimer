@@ -27,7 +27,7 @@ FONT = Pango.FontDescription("monospace 10")
 
 
 class AmbientBar(Gtk.Window):
-    def __init__(self):
+    def __init__(self, monitor=None):
         super().__init__()
         self.snapshot = None
         self.hovered = False
@@ -40,6 +40,8 @@ class AmbientBar(Gtk.Window):
                      GtkLayerShell.Edge.RIGHT):
             GtkLayerShell.set_anchor(self, edge, True)
         GtkLayerShell.set_exclusive_zone(self, STRIP_HEIGHT)
+        if monitor is not None:
+            GtkLayerShell.set_monitor(self, monitor)
 
         visual = self.get_screen().get_rgba_visual()
         if visual:
@@ -54,7 +56,6 @@ class AmbientBar(Gtk.Window):
                         | Gdk.EventMask.LEAVE_NOTIFY_MASK)
         self.connect("enter-notify-event", self.on_hover, True)
         self.connect("leave-notify-event", self.on_hover, False)
-        self.connect("destroy", Gtk.main_quit)
 
         self.set_size_request(-1, STRIP_HEIGHT)
         GLib.timeout_add(1000, self.refresh)
@@ -177,8 +178,36 @@ def main():
         print("ambient bar already running — exiting", file=sys.stderr)
         sys.exit(0)
 
-    bar = AmbientBar()
-    bar.show_all()
+    bars = {}  # Gdk.Monitor -> AmbientBar
+
+    def add_bar(monitor):
+        bar = AmbientBar(monitor=monitor)
+        bars[monitor] = bar
+        bar.connect("destroy", lambda _w: _on_destroy(monitor))
+        bar.show_all()
+
+    def _on_destroy(monitor):
+        bars.pop(monitor, None)
+        if not bars:
+            Gtk.main_quit()
+
+    def on_monitor_added(_display, monitor):
+        add_bar(monitor)
+
+    def on_monitor_removed(_display, monitor):
+        bar = bars.pop(monitor, None)
+        if bar:
+            bar.destroy()
+        if not bars:
+            Gtk.main_quit()
+
+    display = Gdk.Display.get_default()
+    display.connect("monitor-added", on_monitor_added)
+    display.connect("monitor-removed", on_monitor_removed)
+
+    for i in range(display.get_n_monitors()):
+        add_bar(display.get_monitor(i))
+
     Gtk.main()
 
 
