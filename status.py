@@ -89,8 +89,12 @@ def today_str():
 
 
 def format_time(seconds):
-    """Format seconds as M:SS."""
+    """Format seconds as M:SS or H:MM:SS when an hour or more."""
     seconds = int(max(0, seconds))
+    if seconds >= 3600:
+        hours, remainder = divmod(seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours}:{minutes:02d}:{secs:02d}"
     minutes, secs = divmod(seconds, SECONDS_PER_MINUTE)
     return f"{minutes}:{secs:02d}"
 
@@ -105,7 +109,8 @@ def format_history_line(daily_work_totals):
     today_month = today[:7]
     past_days = sorted(d for d in totals if d < today)
 
-    today_h = totals.get(today, 0) / 3600
+    today_secs = totals.get(today, 0)
+    today_h = today_secs / 3600
     week = past_days[-7:]
     avg_7d = sum(totals[d] for d in week) / len(week) / 3600 if week else 0
 
@@ -127,11 +132,16 @@ def format_history_line(daily_work_totals):
     else:
         spark = ""
 
-    parts = [f"{today_h:.1f}h today"]
+    def _fmt_hours(h):
+        if h < 1:
+            return f"{int(round(h * 60))}m"
+        return f"{h:.1f}h"
+
+    parts = [f"{_fmt_hours(today_h)} today"]
     if avg_7d:
         diff = today_h - avg_7d
         sign = "+" if diff >= 0 else ""
-        parts.append(f"avg {avg_7d:.1f}h  {sign}{diff:.1f}h")
+        parts.append(f"avg {_fmt_hours(avg_7d)}  {sign}{diff:.1f}h")
     if spark:
         parts.append(spark)
     return "  ".join(parts)
@@ -139,11 +149,11 @@ def format_history_line(daily_work_totals):
 
 # Shared mana-bar palette: bar fraction → colour (black → red → yellow → cyan → blue).
 COLOR_STOPS = (
-    (0.00, 0, 0, 0),
-    (0.25, 255, 0, 0),
-    (0.50, 255, 255, 0),
-    (0.75, 0, 255, 255),
-    (1.00, 0, 0, 255),
+    (0.00, 130, 0, 0),
+    (0.25, 255, 60, 0),
+    (0.50, 255, 220, 0),
+    (0.75, 0, 220, 200),
+    (1.00, 30, 80, 255),
 )
 
 

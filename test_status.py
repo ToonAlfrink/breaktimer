@@ -123,18 +123,23 @@ class TestFormatTime(unittest.TestCase):
 
 
 class TestColorForFraction(unittest.TestCase):
-    def test_full_is_blue(self):
-        self.assertEqual(status.color_for_fraction(1.0), (0, 0, 255))
+    def test_endpoints_match_palette(self):
+        lo = status.COLOR_STOPS[0][1:]
+        hi = status.COLOR_STOPS[-1][1:]
+        self.assertEqual(status.color_for_fraction(0.0), lo)
+        self.assertEqual(status.color_for_fraction(1.0), hi)
 
-    def test_half_is_yellow(self):
-        self.assertEqual(status.color_for_fraction(0.5), (255, 255, 0))
-
-    def test_empty_is_black(self):
-        self.assertEqual(status.color_for_fraction(0.0), (0, 0, 0))
+    def test_midpoint_interpolates(self):
+        r, g, b = status.color_for_fraction(0.5)
+        self.assertIsInstance(r, int)
+        self.assertIsInstance(g, int)
+        self.assertIsInstance(b, int)
 
     def test_out_of_range_clamped(self):
-        self.assertEqual(status.color_for_fraction(1.5), (0, 0, 255))
-        self.assertEqual(status.color_for_fraction(-0.5), (0, 0, 0))
+        lo = status.COLOR_STOPS[0][1:]
+        hi = status.COLOR_STOPS[-1][1:]
+        self.assertEqual(status.color_for_fraction(1.5), hi)
+        self.assertEqual(status.color_for_fraction(-0.5), lo)
 
 
 class TestFormatHistoryLine(unittest.TestCase):

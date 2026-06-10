@@ -176,9 +176,9 @@ class AmbientBar(Gtk.Window):
             return f"SHUTTING DOWN IN {format_time(grace)} — go idle to cancel"
         remaining = s["remaining_seconds"]
         if remaining < 2 * 60:
-            return f"⚠ {format_time(remaining)} — save your work"
+            return "⚠ save your work now"
         if remaining < WARN_SECONDS:
-            return f"⚠ {format_time(remaining)} — wrap up soon"
+            return "⚠ wrap up soon"
         return None
 
     def _text(self, cr, x, h, text, align="left", rgb=(255, 255, 255)):
