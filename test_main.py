@@ -7,6 +7,7 @@ is pinned here against regression.
 Run: python3 -m unittest -q
 """
 import argparse
+import json
 import os
 import tempfile
 import time
@@ -18,7 +19,6 @@ from main import (
     TimerLoop,
     TimerState,
     compute_offline_duration_seconds,
-    format_time,
     initialize_state,
     load_state_from_file,
     save_state_to_file,
@@ -64,6 +64,12 @@ class TestStatePersistence(InTempDir):
         self.assertAlmostEqual(loaded.remaining_time, 1234.5)
         self.assertEqual(loaded.daily_work_totals, {"2026-06-09": 7200.0})
         self.assertIsNotNone(loaded.last_saved_time)
+
+    def test_only_durable_fields_persisted(self):
+        save_state_to_file(TimerState(remaining_time=10))
+        with open(main.STATE_FILE) as f:
+            keys = set(json.load(f))
+        self.assertEqual(keys, {"remaining_time", "daily_work_totals", "last_saved_time"})
 
     def test_save_is_atomic_leaves_no_temp_file(self):
         save_state_to_file(TimerState(remaining_time=10))
@@ -196,17 +202,6 @@ class TestLiveStatus(unittest.TestCase):
         self.assertEqual(snap["max_seconds"], 3600)
         self.assertAlmostEqual(snap["grace_remaining"], 50, delta=2)
         self.assertIn("history", snap)
-
-
-class TestFormatTime(unittest.TestCase):
-    def test_minutes_and_seconds(self):
-        self.assertEqual(format_time(65), "1:05")
-
-    def test_zero(self):
-        self.assertEqual(format_time(0), "0:00")
-
-    def test_negative_clamped(self):
-        self.assertEqual(format_time(-3), "0:00")
 
 
 if __name__ == "__main__":

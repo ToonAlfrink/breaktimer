@@ -45,14 +45,6 @@ def _write_speed_to_file(path, value):
         f.write(content)
 
 
-def get_current_sensitivity():
-    """Get current speed value from the default Pop OS input config."""
-    value = _read_speed_from_file(CONFIG_DEFAULT_FILE)
-    if value is None:
-        raise RuntimeError(f"Could not read speed from {CONFIG_DEFAULT_FILE}")
-    return value
-
-
 def set_sensitivity(value):
     """Set speed value in all COSMIC input configs (range -1.0 to 1.0). Returns False if no config files found."""
     value = round(max(-1.0, min(1.0, value)), 2)
@@ -80,9 +72,8 @@ def restore_original_sensitivity():
     for path, value in _original_sensitivity.items():
         _write_speed_to_file(path, value)
 
-def set_sensitivity_by_fraction(fraction, max_time_seconds):
+def set_sensitivity_by_fraction(fraction):
     """Set sensitivity based on remaining time fraction (0.0 to 1.0)."""
     sensitivity = -1.0 + (fraction * 2.0)
-    sensitivity = max(-1.0, min(1.0, sensitivity))
     set_sensitivity(sensitivity)
     return sensitivity

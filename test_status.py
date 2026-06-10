@@ -68,6 +68,17 @@ class TestSingletonLock(InTempRuntimeDir):
         b.close()
 
 
+class TestFormatTime(unittest.TestCase):
+    def test_minutes_and_seconds(self):
+        self.assertEqual(status.format_time(65), "1:05")
+
+    def test_zero(self):
+        self.assertEqual(status.format_time(0), "0:00")
+
+    def test_negative_clamped(self):
+        self.assertEqual(status.format_time(-3), "0:00")
+
+
 class TestColorForFraction(unittest.TestCase):
     def test_full_is_blue(self):
         self.assertEqual(status.color_for_fraction(1.0), (0, 0, 255))

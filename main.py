@@ -5,10 +5,9 @@ import os
 import subprocess
 import threading
 import sys
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 import status
-from status import format_time
 from brightness_control import set_brightness_by_fraction
 from mouse_sensitivity_control import set_sensitivity_by_fraction, save_original_sensitivity, restore_original_sensitivity
 
@@ -23,17 +22,22 @@ SAVE_INTERVAL_SECONDS = 10
 
 @dataclass
 class TimerState:
-    """Encapsulates all timer state data."""
+    """Timer state: the durable fields below persist to disk; the activity
+    fields are per-tick runtime status and are not saved."""
     remaining_time: float
     daily_work_totals: dict = field(default_factory=dict)
     last_saved_time: float = None
     is_active: bool = True
     elapsed_since_last_activity: float = 0.0
-    
+
     def to_dict(self):
-        """Convert to dictionary for JSON serialization."""
-        return {k: v for k, v in asdict(self).items() if v is not None}
-    
+        """The durable subset, for JSON persistence."""
+        return {
+            "remaining_time": self.remaining_time,
+            "daily_work_totals": self.daily_work_totals,
+            "last_saved_time": self.last_saved_time,
+        }
+
     @classmethod
     def from_dict(cls, data):
         """Create from dictionary loaded from JSON."""
@@ -163,7 +167,8 @@ def execute_shutdown():
 
 
 class TimerLoop:
-    """Encapsulates the main timer loop logic, following Single Responsibility Principle."""
+    """The headless timer core: ticks once a second, adjusts the mana bar,
+    publishes the live snapshot, and powers the machine off at zero."""
 
     ACTIVITY_THRESHOLD_SECONDS = SECONDS_PER_MINUTE
     ADJUSTMENT_INTERVAL_SECONDS = 10
@@ -221,15 +226,7 @@ class TimerLoop:
         return False
     
     def _update_state(self, current_loop_time, time_since_last_loop):
-        """Update timer state based on activity and elapsed time.
-        
-        Args:
-            current_loop_time: Current timestamp
-            time_since_last_loop: Seconds since last loop iteration
-            
-        Returns:
-            True if shutdown was triggered, False otherwise
-        """
+        """Update timer state for one tick; returns True if shutdown fired."""
         with self.state_lock:
             self._update_activity_status(current_loop_time, time_since_last_loop)
             self._adjust_timer(time_since_last_loop)
@@ -238,8 +235,8 @@ class TimerLoop:
     def _apply_adjustments(self, remaining_fraction, current_loop_time):
         """Apply brightness and sensitivity adjustments if interval has elapsed."""
         if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
-            set_brightness_by_fraction(remaining_fraction, self.mana_max_seconds)
-            set_sensitivity_by_fraction(remaining_fraction, self.mana_max_seconds)
+            set_brightness_by_fraction(remaining_fraction)
+            set_sensitivity_by_fraction(remaining_fraction)
             self.last_adjustment_time = current_loop_time
     
     _SPARK_CHARS = "▁▂▃▄▅▆▇█"
@@ -277,52 +274,11 @@ class TimerLoop:
             parts.append(spark)
         return "  ".join(parts)
 
-    def _get_color_for_fraction(self, fraction):
-        r, g, b = status.color_for_fraction(fraction)
-        return f"\033[38;2;{r};{g};{b}m"
-    
-    def _create_mana_bar(self, remaining, max_time, bar_height):
-        """Create a visual mana bar showing remaining time."""
-        filled = max(0, min(int((remaining / max_time) * bar_height), bar_height))
-        empty = bar_height - filled
-        reset = "\033[0m"
-        
-        fraction = remaining / max_time
-        color = self._get_color_for_fraction(fraction)
-        
-        bar = []
-        for i in range(bar_height):
-            if i < empty:
-                bar.append("░")
-            else:
-                bar.append(f"{color}█{reset}")
-        
-        return bar
-    
-    _RESET = "\033[0m"
-    _BOLD_RED = "\033[1;31m"
-    _RED = "\033[31m"
-    _YELLOW = "\033[33m"
-
     def _grace_remaining(self):
         """Seconds left in the shutdown grace window, or None if not in it."""
         if self.grace_start is None:
             return None
         return max(0.0, self.GRACE_SECONDS - (time.time() - self.grace_start))
-
-    def _warning_line(self, remaining):
-        """Return a warning line string if the timer is in a critical state, else empty string."""
-        grace_remaining = self._grace_remaining()
-        if grace_remaining is not None:
-            return (
-                f"{self._BOLD_RED}  SHUTTING DOWN IN {format_time(grace_remaining)}"
-                f"  — stop typing to cancel{self._RESET}"
-            )
-        if remaining < 2 * SECONDS_PER_MINUTE:
-            return f"{self._RED}⚠  {format_time(remaining)} remaining — save your work{self._RESET}"
-        if remaining < 5 * SECONDS_PER_MINUTE:
-            return f"{self._YELLOW}⚠  {format_time(remaining)} remaining — wrap up soon{self._RESET}"
-        return ""
 
     def _write_status(self):
         """Publish the live snapshot for ambient surfaces (see status.py)."""
@@ -341,40 +297,6 @@ class TimerLoop:
                 print(f"WARNING: cannot publish live status: {e}", file=sys.stderr)
                 self._status_write_warned = True
 
-    def _output_status(self):
-        """Display current timer status."""
-        if not sys.stdout.isatty():
-            return
-        with self.state_lock:
-            remaining = self.state.remaining_time
-            is_active = self.state.is_active
-
-        try:
-            terminal_height = os.get_terminal_size().lines
-        except OSError:
-            terminal_height = 24
-        available_lines = terminal_height - 1
-
-        status_icon = "●" if is_active else "○"
-        percentage = (remaining / self.mana_max_seconds) * 100
-        time_str = format_time(remaining)
-
-        header = [
-            f"{time_str} ({percentage:.1f}%) {status_icon}",
-            self._format_history_line(),
-        ]
-        warning = self._warning_line(remaining)
-        if warning:
-            header.append(warning)
-        bar_height = max(1, available_lines - len(header))
-        mana_bar = self._create_mana_bar(remaining, self.mana_max_seconds, bar_height)
-        
-        output = "\n".join(header + mana_bar)
-        lines_to_move_up = len(header) + bar_height - 1
-        
-        print(output, end='', flush=True)
-        print(f"\033[{lines_to_move_up}A\r", end='', flush=True)
-    
     def run(self):
         """Execute the main timer loop."""
         while True:
@@ -386,7 +308,6 @@ class TimerLoop:
             
             remaining_fraction = self.state.remaining_time / self.mana_max_seconds
             self._apply_adjustments(remaining_fraction, current_loop_time)
-            self._output_status()
             self._write_status()
 
             if current_loop_time - self.last_save_time >= SAVE_INTERVAL_SECONDS:
@@ -424,28 +345,11 @@ def parse_arguments():
     return args
 
 def initialize_state(args, mana_max_seconds):
-    """Initialize timer state from file or create new state.
-    
-    Args:
-        args: Parsed command-line arguments
-        mana_max_seconds: Bar cap (X); remaining_time is clamped to this.
-        
-    Returns:
-        Initialized TimerState instance
-    """
+    """Load saved state (or start full), clamping remaining time to the bar cap."""
     state = load_state_from_file() or TimerState(remaining_time=mana_max_seconds)
-    
-    saved_time = state.remaining_time
-    
     if args.start_minutes is not None:
-        new_time = min(args.start_minutes * SECONDS_PER_MINUTE, mana_max_seconds)
-        state.remaining_time = new_time
-    else:
-        state.remaining_time = min(saved_time, mana_max_seconds)
-    
-    state.is_active = True
-    state.elapsed_since_last_activity = 0.0
-    
+        state.remaining_time = args.start_minutes * SECONDS_PER_MINUTE
+    state.remaining_time = min(state.remaining_time, mana_max_seconds)
     return state
 
 def main():

@@ -63,16 +63,8 @@ def set_external_brightness(display_num, level):
     
     return False
 
-def set_brightness_by_fraction(fraction, max_time_seconds):
-    """Set brightness for all displays based on remaining time fraction.
-    
-    Args:
-        fraction: Remaining time as a fraction of max_time_seconds (0.0 to 1.0)
-        max_time_seconds: Maximum timer value in seconds
-    
-    Returns:
-        The brightness percentage that was set (0-100)
-    """
+def set_brightness_by_fraction(fraction):
+    """Set all displays' brightness to the remaining-time fraction (0.0 to 1.0)."""
     percentage = max(0, min(100, int(fraction * 100)))
     
     set_brightness(percentage)

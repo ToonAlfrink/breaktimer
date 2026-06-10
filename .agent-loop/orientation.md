@@ -21,9 +21,8 @@ a terminal window.
 
 Two independent processes bridged by a live status file:
 
-- `main.py` — the timer core (`TimerLoop`, `ActivityMonitor`, `TimerState`). Headless
-  under autostart; still renders the full-terminal ANSI bar when run in a tty.
-  Publishes a JSON snapshot every tick.
+- `main.py` — the headless timer core (`TimerLoop`, `ActivityMonitor`, `TimerState`).
+  No UI of its own; publishes a JSON snapshot every tick for display surfaces.
 - `ambient.py` — the always-on strip. GTK3 + GtkLayerShell (system packages
   `gir1.2-gtklayershell-0.1`, `libgtk-layer-shell0`); reads the snapshot at 1 Hz,
   goes grey if the core stops publishing. Either process can restart without the other.
@@ -53,7 +52,6 @@ in `projects.yaml`).
 ```bash
 cd ~/Projects/breaktimer
 ./start                  # headless core + ambient bar (idempotent via locks)
-python3 main.py          # terminal mode, full ANSI bar
 ```
 
 ## Quality gaps
