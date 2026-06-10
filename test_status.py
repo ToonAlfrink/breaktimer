@@ -85,6 +85,32 @@ class TestSingletonLock(InTempRuntimeDir):
         lock.close()
 
 
+class TestCommandChannel(InTempRuntimeDir):
+    def test_round_trip(self):
+        status.write_command({"type": "extend", "seconds": 300})
+        cmd = status.read_and_clear_command()
+        self.assertEqual(cmd, {"type": "extend", "seconds": 300})
+
+    def test_read_removes_file(self):
+        status.write_command({"type": "extend", "seconds": 300})
+        status.read_and_clear_command()
+        self.assertIsNone(status.read_and_clear_command())
+
+    def test_missing_returns_none(self):
+        self.assertIsNone(status.read_and_clear_command())
+
+    def test_corrupt_returns_none(self):
+        with open(status.command_path(), "w") as f:
+            f.write("{bad json")
+        self.assertIsNone(status.read_and_clear_command())
+
+    def test_write_is_atomic(self):
+        status.write_command({"type": "extend", "seconds": 60})
+        files = os.listdir(self._tmp.name)
+        self.assertIn("breaktimer-command.json", files)
+        self.assertNotIn("breaktimer-command.json.tmp", files)
+
+
 class TestFormatTime(unittest.TestCase):
     def test_minutes_and_seconds(self):
         self.assertEqual(status.format_time(65), "1:05")

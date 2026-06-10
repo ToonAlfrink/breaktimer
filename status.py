@@ -44,6 +44,31 @@ def read_status(max_age_seconds=5.0):
         return None
 
 
+def command_path():
+    return os.path.join(_runtime_dir(), "breaktimer-command.json")
+
+
+def write_command(cmd):
+    """Write a command dict for the core to pick up on its next tick."""
+    path = command_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cmd, f)
+    os.replace(tmp, path)
+
+
+def read_and_clear_command():
+    """Atomically read and remove the pending command, or return None."""
+    path = command_path()
+    try:
+        with open(path) as f:
+            cmd = json.load(f)
+        os.unlink(path)
+        return cmd
+    except (OSError, ValueError):
+        return None
+
+
 def acquire_singleton_lock(name):
     """Take an exclusive runtime lock for this process's lifetime.
 

@@ -231,6 +231,19 @@ class TimerLoop:
             return None
         return max(0.0, self.GRACE_SECONDS - (time.time() - self.grace_start))
 
+    def _check_commands(self):
+        """Apply any pending command from the control channel."""
+        cmd = status.read_and_clear_command()
+        if not cmd:
+            return
+        if cmd.get("type") == "extend":
+            secs = max(0.0, float(cmd.get("seconds", 600)))
+            with self.state_lock:
+                self.state.remaining_time = min(
+                    self.state.remaining_time + secs, self.mana_max_seconds
+                )
+                self.grace_start = None
+
     def _write_status(self):
         """Publish the live snapshot for ambient surfaces (see status.py)."""
         with self.state_lock:
@@ -254,6 +267,7 @@ class TimerLoop:
             current_loop_time = time.time()
             time_since_last_loop = current_loop_time - self.last_loop_time
             
+            self._check_commands()
             if self._update_state(current_loop_time, time_since_last_loop):
                 sys.exit(0)
             

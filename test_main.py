@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 import main
+import status
 from main import (
     TimerLoop,
     TimerState,
@@ -202,6 +203,47 @@ class TestGraceRemaining(unittest.TestCase):
         loop = make_loop(0)
         loop.grace_start = time.time() - TimerLoop.GRACE_SECONDS - 10
         self.assertEqual(loop._grace_remaining(), 0.0)
+
+
+class TestExtendCommand(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._env = mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": self._tmp.name})
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def test_extend_adds_seconds(self):
+        status.write_command({"type": "extend", "seconds": 600})
+        loop = make_loop(300)
+        loop._check_commands()
+        self.assertEqual(loop.state.remaining_time, 900)
+
+    def test_extend_clamped_at_max(self):
+        status.write_command({"type": "extend", "seconds": 600})
+        loop = make_loop(3500)
+        loop._check_commands()
+        self.assertEqual(loop.state.remaining_time, 3600)
+
+    def test_extend_cancels_grace(self):
+        status.write_command({"type": "extend", "seconds": 600})
+        loop = make_loop(0)
+        loop.grace_start = time.time()
+        loop._check_commands()
+        self.assertIsNone(loop.grace_start)
+
+    def test_no_command_is_noop(self):
+        loop = make_loop(300)
+        loop._check_commands()
+        self.assertEqual(loop.state.remaining_time, 300)
+
+    def test_unknown_command_type_ignored(self):
+        status.write_command({"type": "frobnicate"})
+        loop = make_loop(300)
+        loop._check_commands()
+        self.assertEqual(loop.state.remaining_time, 300)
 
 
 class TestWriteStatusOSError(unittest.TestCase):

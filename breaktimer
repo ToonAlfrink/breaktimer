@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""breaktimer — control the running breaktimer session.
+
+Commands:
+  status           print remaining time and today's work history
+  extend [N]       add N minutes (default: 10) and cancel any shutdown grace
+  restart          restart both systemd user services
+"""
+import subprocess
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import status
+
+
+def cmd_status():
+    s = status.read_status(max_age_seconds=10)
+    if not s:
+        print("breaktimer: core not running")
+        return
+    active = "●" if s["is_active"] else "○"
+    remaining = status.format_time(s["remaining_seconds"])
+    print(f"{remaining} {active}  {s.get('history', '')}")
+
+
+def cmd_extend(minutes=10.0):
+    minutes = float(minutes)
+    status.write_command({"type": "extend", "seconds": minutes * 60})
+    label = f"{minutes:.0f}" if minutes == int(minutes) else f"{minutes:.1f}"
+    print(f"extend: +{label} min queued")
+
+
+def cmd_restart():
+    subprocess.run(
+        ["systemctl", "--user", "restart",
+         "breaktimer-core.service", "breaktimer-ambient.service"],
+        check=True,
+    )
+    print("restarted")
+
+
+COMMANDS = {"status": cmd_status, "extend": cmd_extend, "restart": cmd_restart}
+
+argv = sys.argv[1:]
+if not argv:
+    cmd_status()
+elif argv[0] == "status":
+    cmd_status()
+elif argv[0] == "extend":
+    cmd_extend(float(argv[1]) if len(argv) > 1 else 10.0)
+elif argv[0] == "restart":
+    cmd_restart()
+else:
+    print(__doc__)
+    sys.exit(1)

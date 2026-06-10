@@ -53,9 +53,12 @@ class AmbientBar(Gtk.Window):
         self.add(self.area)
 
         self.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK
-                        | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+                        | Gdk.EventMask.LEAVE_NOTIFY_MASK
+                        | Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
         self.connect("enter-notify-event", self.on_hover, True)
         self.connect("leave-notify-event", self.on_hover, False)
+        self.connect("button-press-event", self.on_click)
 
         self.set_size_request(-1, STRIP_HEIGHT)
         GLib.timeout_add(1000, self.refresh)
@@ -78,6 +81,10 @@ class AmbientBar(Gtk.Window):
         self.set_size_request(-1, self.target_height())
         self.area.queue_draw()
         return True  # keep the GLib timer alive
+
+    def on_click(self, _widget, event):
+        if event.button == 1:
+            status.write_command({"type": "extend", "seconds": 600})
 
     def on_hover(self, _widget, _event, entered):
         self.hovered = entered
