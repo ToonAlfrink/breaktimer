@@ -1,5 +1,6 @@
 [Unit]
 Description=breaktimer core — headless work-session timer
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/usr/bin/python3 /home/user/Projects/breaktimer/main.py

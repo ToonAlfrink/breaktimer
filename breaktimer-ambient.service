@@ -2,11 +2,12 @@
 Description=breaktimer ambient bar — layer-shell strip on each monitor
 After=graphical-session.target
 PartOf=graphical-session.target
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/usr/bin/python3 /home/user/Projects/breaktimer/ambient.py
 Restart=always
-RestartSec=5
+RestartSec=2
 
 [Install]
 WantedBy=graphical-session.target

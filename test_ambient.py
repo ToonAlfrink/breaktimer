@@ -1,5 +1,11 @@
 """Tests for ambient bar logic that does not require a live GTK/Wayland session."""
+import configparser
+import os
+import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 
 import ambient
 from ambient import AmbientBar, BarManager, EXPAND_SECONDS, WARN_SECONDS
@@ -132,6 +138,75 @@ class TestBarManager(unittest.TestCase):
         self.assertEqual(mgr.count(), 1)
         self.assertEqual(len(created), 2)
         self.assertFalse(created[1].destroyed)
+
+
+class TestWaitForWayland(unittest.TestCase):
+    def test_returns_true_immediately_if_socket_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            socket = os.path.join(d, "wayland-0")
+            open(socket, "w").close()
+            with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": d, "WAYLAND_DISPLAY": "wayland-0"}):
+                self.assertTrue(ambient._wait_for_wayland(timeout_seconds=1))
+
+    def test_returns_false_on_timeout(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": d, "WAYLAND_DISPLAY": "wayland-0"}):
+                start = time.monotonic()
+                self.assertFalse(ambient._wait_for_wayland(timeout_seconds=0.2))
+                self.assertLess(time.monotonic() - start, 1.5)
+
+    def test_waits_until_socket_appears(self):
+        with tempfile.TemporaryDirectory() as d:
+            socket = os.path.join(d, "wayland-0")
+
+            def _create():
+                time.sleep(0.3)
+                open(socket, "w").close()
+
+            threading.Thread(target=_create, daemon=True).start()
+            with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": d, "WAYLAND_DISPLAY": "wayland-0"}):
+                self.assertTrue(ambient._wait_for_wayland(timeout_seconds=3))
+
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_service(filename):
+    """Parse a systemd service file, returning all key=value pairs."""
+    cfg = configparser.RawConfigParser(strict=False)
+    cfg.read(os.path.join(HERE, filename))
+    result = {}
+    for section in cfg.sections():
+        for k, v in cfg.items(section):
+            result[k.lower()] = v
+    return result
+
+
+class TestServiceConfig(unittest.TestCase):
+    def test_ambient_never_gives_up_restarting(self):
+        cfg = _load_service("breaktimer-ambient.service")
+        self.assertEqual(cfg.get("startlimitintervalsec"), "0",
+                         "ambient must set StartLimitIntervalSec=0 so it retries indefinitely")
+
+    def test_core_never_gives_up_restarting(self):
+        cfg = _load_service("breaktimer-core.service")
+        self.assertEqual(cfg.get("startlimitintervalsec"), "0",
+                         "core must set StartLimitIntervalSec=0 so it retries indefinitely")
+
+    def test_ambient_restarts_on_any_exit(self):
+        cfg = _load_service("breaktimer-ambient.service")
+        self.assertEqual(cfg.get("restart"), "always")
+
+    def test_core_restarts_on_any_exit(self):
+        cfg = _load_service("breaktimer-core.service")
+        self.assertEqual(cfg.get("restart"), "always")
+
+    def test_ambient_faster_restart_than_core(self):
+        # Ambient recovers from Wayland compositor crashes faster than core
+        # recovers from its own restarts (core holds persistent state).
+        ambient_sec = int(_load_service("breaktimer-ambient.service").get("restartsec", "5"))
+        core_sec = int(_load_service("breaktimer-core.service").get("restartsec", "5"))
+        self.assertLessEqual(ambient_sec, core_sec)
 
 
 if __name__ == "__main__":

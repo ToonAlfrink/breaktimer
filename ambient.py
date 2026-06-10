@@ -7,7 +7,9 @@ expands with detail text on hover or when time runs low (the expansion overlays
 windows rather than shoving them around). If the core stops publishing, the
 strip turns grey instead of lying about remaining time.
 """
+import os
 import sys
+import time
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -17,6 +19,25 @@ from gi.repository import Gtk, Gdk, GLib, GtkLayerShell, Pango, PangoCairo
 
 import status
 from status import format_time
+
+def _wait_for_wayland(timeout_seconds=120):
+    """Block until the Wayland compositor socket appears.
+
+    The ambient service starts as soon as graphical-session.target becomes
+    active, but the Wayland socket may not exist yet. Without this wait the
+    process crashes immediately and systemd has to retry 9+ times over 45s.
+    Returns True when ready, False if the socket never appears before timeout.
+    """
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+    socket = os.path.join(runtime_dir, display)
+    deadline = time.monotonic() + timeout_seconds
+    while not os.path.exists(socket):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+    return True
+
 
 STRIP_HEIGHT = 6
 EXPANDED_HEIGHT = 28
@@ -209,6 +230,10 @@ def main():
     if lock is None:
         print("ambient bar already running — exiting", file=sys.stderr)
         sys.exit(0)
+
+    if not _wait_for_wayland():
+        print("Wayland socket not available after 120s — giving up", file=sys.stderr)
+        sys.exit(1)
 
     def _create_bar(monitor):
         bar = AmbientBar(monitor=monitor)
