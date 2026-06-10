@@ -1,61 +1,22 @@
 #!/bin/bash
 
-# Pomodoro Timer Auto-Launcher for COSMIC Desktop
-# This script automatically starts the Pomodoro timer in a terminal window
+# breaktimer launcher — headless timer core + ambient layer-shell bar.
+# Designed for desktop autostart (~/.config/autostart/breaktimer.desktop).
+# Idempotent: each process holds a runtime singleton lock and exits if
+# another instance is already running.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Wait for the desktop environment to fully load
-sleep 10
+cd "$SCRIPT_DIR" || exit 1
 
-# Change to the script directory
-cd "$SCRIPT_DIR" || {
-    echo "Failed to change to breaktimer directory" >&2
-    exit 1
-}
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/breaktimer"
+mkdir -p "$LOG_DIR"
 
-# Function to launch with cosmic-term
-launch_cosmic_term() {
-    cosmic-term \
-        --title="Pomodoro Timer" \
-        --working-directory="$SCRIPT_DIR" \
-        -- bash -c "
-            python3 main.py || {
-                echo 'Pomodoro script failed. Press Enter to close.';
-                read;
-            }
-        "
-}
+# Wait for the Wayland session instead of a blind sleep.
+SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-1}"
+for _ in $(seq 1 30); do
+    [ -S "$SOCKET" ] && break
+    sleep 1
+done
 
-# Function to launch with gnome-terminal as fallback
-launch_gnome_terminal() {
-    # Get screen dimensions for positioning
-    if command -v xdpyinfo >/dev/null 2>&1; then
-        SCREEN_WIDTH=$(xdpyinfo | awk '/dimensions/{print $2}' | cut -d'x' -f1)
-        WINDOW_WIDTH=500
-        X_POS=$((SCREEN_WIDTH - WINDOW_WIDTH - 50))
-        GEOMETRY_ARG="--geometry=${WINDOW_WIDTH}x20+${X_POS}+50"
-    else
-        GEOMETRY_ARG=""
-    fi
-
-    gnome-terminal \
-        $GEOMETRY_ARG \
-        --title="Pomodoro Timer" \
-        --working-directory="$SCRIPT_DIR" \
-        -- bash -c "
-            python3 main.py || {
-                echo 'Pomodoro script failed. Press Enter to close.';
-                read;
-            }
-        "
-}
-
-# Try cosmic-term first, then fallback to gnome-terminal
-if command -v cosmic-term >/dev/null 2>&1; then
-    launch_cosmic_term
-    if [ $? -ne 0 ]; then
-        launch_gnome_terminal
-    fi
-else
-    launch_gnome_terminal
-fi
+python3 main.py >>"$LOG_DIR/core.log" 2>&1 &
+python3 ambient.py >>"$LOG_DIR/ambient.log" 2>&1 &

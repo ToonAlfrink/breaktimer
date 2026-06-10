@@ -183,6 +183,21 @@ class TestInitializeState(InTempDir):
         self.assertEqual(state.remaining_time, 3600)
 
 
+class TestLiveStatus(unittest.TestCase):
+    def test_loop_publishes_snapshot(self):
+        import status as status_mod
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp}):
+            loop = make_loop(900)
+            loop.grace_start = time.time() - 10
+            loop._write_status()
+            snap = status_mod.read_status()
+        self.assertEqual(snap["remaining_seconds"], 900)
+        self.assertEqual(snap["max_seconds"], 3600)
+        self.assertAlmostEqual(snap["grace_remaining"], 50, delta=2)
+        self.assertIn("history", snap)
+
+
 class TestFormatTime(unittest.TestCase):
     def test_minutes_and_seconds(self):
         self.assertEqual(format_time(65), "1:05")

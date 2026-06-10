@@ -7,6 +7,8 @@ import threading
 import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
+import status
+from status import format_time
 from brightness_control import set_brightness_by_fraction
 from mouse_sensitivity_control import set_sensitivity_by_fraction, save_original_sensitivity, restore_original_sensitivity
 
@@ -45,13 +47,6 @@ class TimerState:
 def today_str():
     """Returns today's date as YYYY-MM-DD string."""
     return datetime.now().strftime('%Y-%m-%d')
-
-
-def format_time(seconds):
-    """Format seconds as MM:SS."""
-    seconds = int(max(0, seconds))
-    minutes, secs = divmod(seconds, SECONDS_PER_MINUTE)
-    return f"{minutes}:{secs:02d}"
 
 
 class ActivityMonitor:
@@ -183,8 +178,8 @@ class TimerLoop:
         self.last_save_time = time.time()
         self.last_adjustment_time = time.time()
         self.state_lock = threading.Lock()
-        self.previous_output_lines = 0
         self.grace_start = None
+        self._status_write_warned = False
     
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
         """Update activity detection status based on user input."""
@@ -282,26 +277,9 @@ class TimerLoop:
             parts.append(spark)
         return "  ".join(parts)
 
-    _COLOR_STOPS = (  # (fraction, r, g, b) — blue → cyan → yellow → red → black
-        (0.00, 0, 0, 0),
-        (0.25, 255, 0, 0),
-        (0.50, 255, 255, 0),
-        (0.75, 0, 255, 255),
-        (1.00, 0, 0, 255),
-    )
-
     def _get_color_for_fraction(self, fraction):
-        fraction = max(0.0, min(1.0, fraction))
-        for i in range(len(self._COLOR_STOPS) - 1):
-            lo, r0, g0, b0 = self._COLOR_STOPS[i]
-            hi, r1, g1, b1 = self._COLOR_STOPS[i + 1]
-            if lo <= fraction <= hi:
-                t = (fraction - lo) / (hi - lo)
-                r = int(r0 + t * (r1 - r0))
-                g = int(g0 + t * (g1 - g0))
-                b = int(b0 + t * (b1 - b0))
-                return f"\033[38;2;{r};{g};{b}m"
-        return "\033[38;2;0;0;255m"
+        r, g, b = status.color_for_fraction(fraction)
+        return f"\033[38;2;{r};{g};{b}m"
     
     def _create_mana_bar(self, remaining, max_time, bar_height):
         """Create a visual mana bar showing remaining time."""
@@ -326,11 +304,16 @@ class TimerLoop:
     _RED = "\033[31m"
     _YELLOW = "\033[33m"
 
+    def _grace_remaining(self):
+        """Seconds left in the shutdown grace window, or None if not in it."""
+        if self.grace_start is None:
+            return None
+        return max(0.0, self.GRACE_SECONDS - (time.time() - self.grace_start))
+
     def _warning_line(self, remaining):
         """Return a warning line string if the timer is in a critical state, else empty string."""
-        if self.grace_start is not None:
-            grace_elapsed = time.time() - self.grace_start
-            grace_remaining = max(0, self.GRACE_SECONDS - grace_elapsed)
+        grace_remaining = self._grace_remaining()
+        if grace_remaining is not None:
             return (
                 f"{self._BOLD_RED}  SHUTTING DOWN IN {format_time(grace_remaining)}"
                 f"  — stop typing to cancel{self._RESET}"
@@ -341,8 +324,27 @@ class TimerLoop:
             return f"{self._YELLOW}⚠  {format_time(remaining)} remaining — wrap up soon{self._RESET}"
         return ""
 
+    def _write_status(self):
+        """Publish the live snapshot for ambient surfaces (see status.py)."""
+        with self.state_lock:
+            payload = {
+                "remaining_seconds": self.state.remaining_time,
+                "max_seconds": self.mana_max_seconds,
+                "is_active": self.state.is_active,
+                "grace_remaining": self._grace_remaining(),
+                "history": self._format_history_line(),
+            }
+        try:
+            status.write_status(payload)
+        except OSError as e:
+            if not self._status_write_warned:
+                print(f"WARNING: cannot publish live status: {e}", file=sys.stderr)
+                self._status_write_warned = True
+
     def _output_status(self):
         """Display current timer status."""
+        if not sys.stdout.isatty():
+            return
         with self.state_lock:
             remaining = self.state.remaining_time
             is_active = self.state.is_active
@@ -385,6 +387,7 @@ class TimerLoop:
             remaining_fraction = self.state.remaining_time / self.mana_max_seconds
             self._apply_adjustments(remaining_fraction, current_loop_time)
             self._output_status()
+            self._write_status()
 
             if current_loop_time - self.last_save_time >= SAVE_INTERVAL_SECONDS:
                 save_state_to_file(self.state)
@@ -447,6 +450,11 @@ def initialize_state(args, mana_max_seconds):
 
 def main():
     """Main function to run the countdown timer."""
+    lock = status.acquire_singleton_lock("core")
+    if lock is None:
+        print("breaktimer core already running — exiting", file=sys.stderr)
+        sys.exit(1)
+
     args = parse_arguments()
     mana_max_seconds = args.deplete_minutes * SECONDS_PER_MINUTE
     mana_replenish_seconds = args.replenish_minutes * SECONDS_PER_MINUTE
