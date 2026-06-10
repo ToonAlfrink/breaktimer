@@ -1,4 +1,5 @@
+__pycache__/
 state.json
-shutdown_trigger.json
+state.json.tmp
 pomodoro_state.json
 state.sync-conflict-*.json

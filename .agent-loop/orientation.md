@@ -16,10 +16,18 @@ shutting the system down when the "mana bar" reaches zero.
 
 Pure Python 3, stdlib only — no pip dependencies. Three modules:
 - `main.py` — the entry point; `TimerLoop`, `ActivityMonitor`, `TimerState`.
-- `brightness_control.py` — wraps `xrandr`/sysfs to set screen brightness.
-- `mouse_sensitivity_control.py` — wraps `xinput` to scale pointer sensitivity.
+- `brightness_control.py` — wraps `brightnessctl`/sysfs/ddcutil to set screen brightness.
+- `mouse_sensitivity_control.py` — rewrites COSMIC input config files to scale pointer speed.
 
-No tests. No packaging. No CI.
+`test_main.py` is the smoke suite over the shutdown-power core (persistence,
+depletion/replenishment arithmetic, shutdown grace window). Run it before and
+after any change to `main.py`:
+
+```bash
+python3 -m unittest -q
+```
+
+No packaging. No CI (the test suite doubles as the loop's health probe).
 
 ## Running
 
@@ -30,12 +38,11 @@ python3 main.py --deplete-minutes 60 --replenish-minutes 20
 
 ## Health check
 
-No health server — this is a standalone CLI tool. Leave `health_cmd` empty in `projects.yaml`.
+`health_cmd` in `projects.yaml` runs the test suite (`python3 -m unittest -q`) —
+a failing suite shows up in every dispatch turn's health snapshot.
 
 ## Quality gaps
 
-- No test suite.
-- `execute_shutdown` tries three commands sequentially with no logging.
-- `ActivityMonitor` swallows all exceptions silently.
-- `state.json` and `pomodoro_state.json` are both present — the latter appears stale.
 - The `start` script uses `sleep 10` (brittle autostart) and hardcodes geometry guessing.
+- `pomodoro_state.json` and `state.sync-conflict-*.json` on disk are stale Syncthing
+  artifacts — gitignored, owner's data, leave them.

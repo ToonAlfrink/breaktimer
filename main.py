@@ -116,12 +116,15 @@ class ActivityMonitor:
 
 
 def save_state_to_file(state):
-    """Saves a cleaned version of the current state to a JSON file directly."""
+    """Saves state atomically (write temp, then rename) — this app powers the
+    machine off, so a save interrupted mid-write must not corrupt the file."""
     state.last_saved_time = time.time()
     state_to_save = state.to_dict()
 
-    with open(STATE_FILE, 'w') as f:
+    tmp_path = STATE_FILE + ".tmp"
+    with open(tmp_path, 'w') as f:
         json.dump(state_to_save, f, indent=4)
+    os.replace(tmp_path, STATE_FILE)
 
 def load_state_from_file():
     """Loads the state from a JSON file. Returns None if file not found or corrupt."""
@@ -171,9 +174,8 @@ class TimerLoop:
     ADJUSTMENT_INTERVAL_SECONDS = 10
     GRACE_SECONDS = 60
 
-    def __init__(self, state, args, offline_duration_seconds, activity_monitor, mana_max_seconds, mana_replenish_seconds):
+    def __init__(self, state, offline_duration_seconds, activity_monitor, mana_max_seconds, mana_replenish_seconds):
         self.state = state
-        self.args = args
         self.activity_monitor = activity_monitor
         self.mana_max_seconds = mana_max_seconds
         self.mana_replenish_seconds = mana_replenish_seconds
@@ -215,6 +217,7 @@ class TimerLoop:
             if self.grace_start is None:
                 self.grace_start = now
             if now - self.grace_start >= self.GRACE_SECONDS:
+                save_state_to_file(self.state)
                 execute_shutdown()
                 return True
         else:
@@ -412,7 +415,10 @@ def parse_arguments():
         default=20,
         help="Minutes to replenish from empty to full (Y)."
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.deplete_minutes <= 0 or args.replenish_minutes <= 0:
+        parser.error("--deplete-minutes and --replenish-minutes must be positive")
+    return args
 
 def initialize_state(args, mana_max_seconds):
     """Initialize timer state from file or create new state.
@@ -459,7 +465,6 @@ def main():
     try:
         timer_loop = TimerLoop(
             state,
-            args,
             offline_duration_seconds,
             activity_monitor,
             mana_max_seconds,
