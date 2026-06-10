@@ -20,7 +20,9 @@ from status import format_time
 
 STRIP_HEIGHT = 6
 EXPANDED_HEIGHT = 28
-WARNING_SECONDS = 5 * 60
+EXPAND_SECONDS = 10 * 60   # bar expands and shows time at this threshold
+WARN_SECONDS = 5 * 60      # warning text ("wrap up", "save") appears below this
+PULSE_MS = 500             # grace-mode background pulse interval
 FONT = Pango.FontDescription("monospace 10")
 
 
@@ -29,6 +31,7 @@ class AmbientBar(Gtk.Window):
         super().__init__()
         self.snapshot = None
         self.hovered = False
+        self._pulse = False
 
         GtkLayerShell.init_for_window(self)
         GtkLayerShell.set_namespace(self, "breaktimer")
@@ -55,9 +58,20 @@ class AmbientBar(Gtk.Window):
 
         self.set_size_request(-1, STRIP_HEIGHT)
         GLib.timeout_add(1000, self.refresh)
+        GLib.timeout_add(PULSE_MS, self._pulse_tick)
         self.refresh()
 
     # -- state -----------------------------------------------------------
+    def _pulse_tick(self):
+        in_grace = self.snapshot and self.snapshot.get("grace_remaining") is not None
+        if in_grace:
+            self._pulse = not self._pulse
+            self.area.queue_draw()
+        elif self._pulse:
+            self._pulse = False
+            self.area.queue_draw()
+        return True
+
     def refresh(self):
         self.snapshot = status.read_status()
         self.set_size_request(-1, self.target_height())
@@ -74,7 +88,7 @@ class AmbientBar(Gtk.Window):
         if not s:
             return False
         return (s.get("grace_remaining") is not None
-                or s["remaining_seconds"] < WARNING_SECONDS)
+                or s["remaining_seconds"] < EXPAND_SECONDS)
 
     def target_height(self):
         expanded = self.hovered or self.is_critical()
@@ -85,7 +99,11 @@ class AmbientBar(Gtk.Window):
         w = area.get_allocated_width()
         h = area.get_allocated_height()
 
-        cr.set_source_rgba(0.06, 0.06, 0.06, 0.92)
+        in_grace = self.snapshot and self.snapshot.get("grace_remaining") is not None
+        if in_grace and self._pulse:
+            cr.set_source_rgba(0.40, 0.03, 0.03, 0.96)
+        else:
+            cr.set_source_rgba(0.06, 0.06, 0.06, 0.92)
         cr.paint()
 
         s = self.snapshot
@@ -111,7 +129,7 @@ class AmbientBar(Gtk.Window):
 
     def _draw_detail(self, cr, w, h, s, fraction):
         icon = "●" if s["is_active"] else "○"
-        left = f" {format_time(s['remaining_seconds'])} ({fraction * 100:.0f}%) {icon}"
+        left = f" {format_time(s['remaining_seconds'])} {icon}"
         self._text(cr, 0, h, left, align="left")
 
         history = s.get("history")
@@ -125,12 +143,11 @@ class AmbientBar(Gtk.Window):
     def _warning_text(self, s):
         grace = s.get("grace_remaining")
         if grace is not None:
-            return (f"SHUTTING DOWN IN {format_time(grace)} "
-                    f"— stop typing to cancel")
+            return f"SHUTTING DOWN IN {format_time(grace)} — go idle to cancel"
         remaining = s["remaining_seconds"]
         if remaining < 2 * 60:
             return f"⚠ {format_time(remaining)} — save your work"
-        if remaining < WARNING_SECONDS:
+        if remaining < WARN_SECONDS:
             return f"⚠ {format_time(remaining)} — wrap up soon"
         return None
 
