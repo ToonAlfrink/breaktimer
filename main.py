@@ -14,6 +14,25 @@ from mouse_sensitivity_control import set_sensitivity_by_fraction, save_original
 STATE_FILE = "state.json"
 SAVE_INTERVAL_SECONDS = 10
 
+# (threshold_seconds, urgency, message) — fired once per descent through each level,
+# reset when the timer refills back above the threshold.
+_NOTIFY_THRESHOLDS = [
+    (600, "normal",   "10 minutes remaining"),
+    (300, "normal",   "5 minutes remaining — wrap up soon"),
+    (120, "critical", "2 minutes remaining — save your work now"),
+]
+
+
+def _notify(body, urgency="normal"):
+    """Fire a desktop notification; silently no-ops if notify-send is absent."""
+    try:
+        subprocess.run(
+            ["notify-send", f"--urgency={urgency}", "--app-name=breaktimer", body],
+            check=False, timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
 
 @dataclass
 class TimerState:
@@ -171,6 +190,7 @@ class TimerLoop:
         self.last_adjustment_time = time.time()
         self.grace_start = None
         self._status_write_warned = False
+        self._notified = set()
     
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
         """Update activity detection status based on user input."""
@@ -223,6 +243,27 @@ class TimerLoop:
             return None
         return max(0.0, self.GRACE_SECONDS - (time.time() - self.grace_start))
 
+    def _check_notifications(self):
+        """Fire desktop notifications when the timer crosses key thresholds."""
+        remaining = self.state.remaining_time
+        grace = self._grace_remaining()
+
+        if grace is not None:
+            if "grace" not in self._notified:
+                self._notified.add("grace")
+                _notify(f"Shutting down in {int(grace) + 1}s — go idle to cancel",
+                        urgency="critical")
+        else:
+            self._notified.discard("grace")
+
+        for threshold, urgency, msg in _NOTIFY_THRESHOLDS:
+            if remaining <= threshold:
+                if threshold not in self._notified:
+                    self._notified.add(threshold)
+                    _notify(msg, urgency=urgency)
+            else:
+                self._notified.discard(threshold)
+
     def _check_commands(self):
         """Apply any pending command from the control channel."""
         cmd = status.read_and_clear_command()
@@ -265,6 +306,7 @@ class TimerLoop:
             
             remaining_fraction = self.state.remaining_time / self.mana_max_seconds
             self._apply_adjustments(remaining_fraction, current_loop_time)
+            self._check_notifications()
             self._write_status()
 
             if current_loop_time - self.last_save_time >= SAVE_INTERVAL_SECONDS:
