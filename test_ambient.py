@@ -2,7 +2,7 @@
 import unittest
 
 import ambient
-from ambient import AmbientBar, EXPAND_SECONDS, WARN_SECONDS
+from ambient import AmbientBar, BarManager, EXPAND_SECONDS, WARN_SECONDS
 
 
 class TestWarningText(unittest.TestCase):
@@ -61,6 +61,77 @@ class TestIsCritical(unittest.TestCase):
     def test_above_expand_threshold_not_critical(self):
         bar = self._bar_with_snapshot({"grace_remaining": None, "remaining_seconds": EXPAND_SECONDS + 1})
         self.assertFalse(bar.is_critical())
+
+
+class TestBarManager(unittest.TestCase):
+    def _setup(self):
+        created = []
+
+        class FakeBar:
+            def __init__(self, monitor):
+                self.monitor = monitor
+                self.destroyed = False
+
+            def destroy(self):
+                self.destroyed = True
+
+        def factory(monitor):
+            bar = FakeBar(monitor)
+            created.append(bar)
+            return bar
+
+        return BarManager(factory), created
+
+    def test_add_creates_bar(self):
+        mgr, created = self._setup()
+        mgr.add("mon1")
+        self.assertEqual(mgr.count(), 1)
+        self.assertEqual(len(created), 1)
+
+    def test_add_same_monitor_twice_is_idempotent(self):
+        mgr, created = self._setup()
+        mgr.add("mon1")
+        mgr.add("mon1")
+        self.assertEqual(mgr.count(), 1)
+        self.assertEqual(len(created), 1)
+
+    def test_add_multiple_monitors(self):
+        mgr, created = self._setup()
+        mgr.add("mon1")
+        mgr.add("mon2")
+        self.assertEqual(mgr.count(), 2)
+        self.assertEqual(len(created), 2)
+
+    def test_remove_destroys_bar_and_decrements_count(self):
+        mgr, created = self._setup()
+        mgr.add("mon1")
+        mgr.remove("mon1")
+        self.assertTrue(created[0].destroyed)
+        self.assertEqual(mgr.count(), 0)
+
+    def test_remove_nonexistent_is_noop(self):
+        mgr, _ = self._setup()
+        mgr.remove("never-added")  # must not raise
+        self.assertEqual(mgr.count(), 0)
+
+    def test_remove_all_monitors_does_not_quit(self):
+        # Regression: removing the last monitor used to call Gtk.main_quit(),
+        # killing the process. A reconnected monitor would get no bar without a
+        # full restart. BarManager must survive zero-bar state.
+        mgr, _ = self._setup()
+        mgr.add("mon1")
+        mgr.remove("mon1")
+        self.assertEqual(mgr.count(), 0)
+        # If we get here, Gtk.main_quit() was NOT called (no GTK is running).
+
+    def test_reconnected_monitor_gets_new_bar(self):
+        mgr, created = self._setup()
+        mgr.add("mon1")
+        mgr.remove("mon1")
+        mgr.add("mon1")
+        self.assertEqual(mgr.count(), 1)
+        self.assertEqual(len(created), 2)
+        self.assertFalse(created[1].destroyed)
 
 
 if __name__ == "__main__":

@@ -172,41 +172,50 @@ class AmbientBar(Gtk.Window):
         PangoCairo.show_layout(cr, layout)
 
 
+class BarManager:
+    """Creates and tracks one AmbientBar per monitor.
+
+    Never calls Gtk.main_quit() — the process lives until SIGTERM so that
+    reconnected monitors always get a new bar without requiring a restart.
+    """
+
+    def __init__(self, create_bar):
+        self._bars = {}
+        self._create_bar = create_bar
+
+    def add(self, monitor):
+        if monitor in self._bars:
+            return
+        self._bars[monitor] = self._create_bar(monitor)
+
+    def remove(self, monitor):
+        bar = self._bars.pop(monitor, None)
+        if bar is not None:
+            bar.destroy()
+
+    def count(self):
+        return len(self._bars)
+
+
 def main():
     lock = status.acquire_singleton_lock("ambient")
     if lock is None:
         print("ambient bar already running — exiting", file=sys.stderr)
         sys.exit(0)
 
-    bars = {}  # Gdk.Monitor -> AmbientBar
-
-    def add_bar(monitor):
+    def _create_bar(monitor):
         bar = AmbientBar(monitor=monitor)
-        bars[monitor] = bar
-        bar.connect("destroy", lambda _w: _on_destroy(monitor))
         bar.show_all()
+        return bar
 
-    def _on_destroy(monitor):
-        bars.pop(monitor, None)
-        if not bars:
-            Gtk.main_quit()
-
-    def on_monitor_added(_display, monitor):
-        add_bar(monitor)
-
-    def on_monitor_removed(_display, monitor):
-        bar = bars.pop(monitor, None)
-        if bar:
-            bar.destroy()
-        if not bars:
-            Gtk.main_quit()
+    manager = BarManager(_create_bar)
 
     display = Gdk.Display.get_default()
-    display.connect("monitor-added", on_monitor_added)
-    display.connect("monitor-removed", on_monitor_removed)
+    display.connect("monitor-added", lambda _d, m: manager.add(m))
+    display.connect("monitor-removed", lambda _d, m: manager.remove(m))
 
     for i in range(display.get_n_monitors()):
-        add_bar(display.get_monitor(i))
+        manager.add(display.get_monitor(i))
 
     Gtk.main()
 

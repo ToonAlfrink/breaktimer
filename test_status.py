@@ -1,6 +1,8 @@
 """Tests for the live status bridge (status.py)."""
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -66,6 +68,21 @@ class TestSingletonLock(InTempRuntimeDir):
         self.assertIsNotNone(b)
         a.close()
         b.close()
+
+    def test_lock_released_when_holder_exits(self):
+        # Watchdog correctness: after a crash, the OS releases the lock so a
+        # fresh process can restart. Verify this by acquiring in a subprocess,
+        # letting it exit, then confirming we can acquire in this process.
+        script = (
+            "import os, sys, status\n"
+            f"os.environ['XDG_RUNTIME_DIR'] = {self._tmp.name!r}\n"
+            "lock = status.acquire_singleton_lock('restart-test')\n"
+            "sys.exit(0 if lock else 1)\n"
+        )
+        p = subprocess.run([sys.executable, "-c", script], check=True)
+        lock = status.acquire_singleton_lock("restart-test")
+        self.assertIsNotNone(lock, "lock must be free after the holder process exits")
+        lock.close()
 
 
 class TestFormatTime(unittest.TestCase):
