@@ -1,5 +1,9 @@
+import os
 import subprocess
 import glob
+import time
+
+import status
 
 _external_displays_cache = None
 
@@ -58,9 +62,49 @@ def set_external_brightness(display_num, level):
     except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
         pass
 
-def set_brightness_by_fraction(fraction):
-    """Set all displays' brightness to the remaining-time fraction (0.0 to 1.0)."""
-    percentage = max(0, min(100, int(fraction * 100)))
+def pause_until():
+    """Epoch seconds until which brightness control is paused (0.0 if not paused)."""
+    try:
+        with open(status.brightness_pause_path()) as f:
+            return float(f.read().strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
+def is_paused():
+    return time.time() < pause_until()
+
+
+def pause(seconds, level=100):
+    """Suspend brightness adjustments for `seconds`, parking displays at `level`%."""
+    path = status.brightness_pause_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(str(time.time() + seconds))
+    os.replace(tmp, path)
+    _apply_to_all_displays(level)
+
+
+def unpause():
+    """Resume brightness adjustments (the core re-applies within its next tick)."""
+    try:
+        os.unlink(status.brightness_pause_path())
+    except OSError:
+        pass
+
+
+def _apply_to_all_displays(percentage):
     set_brightness(percentage)
     for display_num in get_external_displays():
         set_external_brightness(display_num, percentage)
+
+
+def set_brightness_by_fraction(fraction):
+    """Set all displays' brightness to the remaining-time fraction (0.0 to 1.0).
+
+    No-op while paused (see pause()/unpause()) so manual control stays in effect.
+    """
+    if is_paused():
+        return
+    percentage = max(0, min(100, int(fraction * 100)))
+    _apply_to_all_displays(percentage)

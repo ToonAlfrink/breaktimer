@@ -57,6 +57,10 @@ def write_command(cmd):
     os.replace(tmp, path)
 
 
+def brightness_pause_path():
+    return os.path.join(_runtime_dir(), "breaktimer-brightness-pause")
+
+
 def read_and_clear_command():
     """Atomically read and remove the pending command, or return None."""
     path = command_path()
