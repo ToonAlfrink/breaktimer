@@ -1,6 +1,9 @@
 import subprocess
 import glob
 
+_external_displays_cache = None
+
+
 def set_brightness(level):
     """Set screen brightness level (0-100)."""
     if level is None:
@@ -29,24 +32,28 @@ def set_brightness(level):
     return False
 
 def get_external_displays():
-    """Get list of external displays that support DDC/CI."""
+    """Get list of external displays that support DDC/CI. Result is cached for the process lifetime."""
+    global _external_displays_cache
+    if _external_displays_cache is not None:
+        return _external_displays_cache
+
     displays = []
     try:
-        result = subprocess.run(['ddcutil', 'detect', '--brief'], 
-                              capture_output=True, text=True, timeout=10)
+        result = subprocess.run(['ddcutil', 'detect', '--brief'],
+                                capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             for line in result.stdout.split('\n'):
                 if line.strip().startswith('Display'):
                     parts = line.strip().split()
                     if len(parts) >= 2:
                         try:
-                            display_num = int(parts[1])
-                            displays.append(display_num)
+                            displays.append(int(parts[1]))
                         except ValueError:
                             pass
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    
+
+    _external_displays_cache = displays
     return displays
 
 def set_external_brightness(display_num, level):

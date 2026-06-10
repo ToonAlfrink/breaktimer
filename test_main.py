@@ -260,6 +260,32 @@ class TestFormatHistoryLine(unittest.TestCase):
         line = loop._format_history_line()
         self.assertIn("+", line)
 
+    def test_monthly_sparkline_uses_month_totals(self):
+        # Two months: Jan at 36h, Feb at 72h (2x) → Feb bar should be taller (█).
+        jan = {f"2026-01-{d:02d}": 3600 for d in range(1, 10)}   # 9 * 1h = 9h no…
+        jan = {"2026-01-01": 36 * 3600}
+        feb = {"2026-02-01": 72 * 3600}
+        totals = {**jan, **feb, main.today_str(): 0}
+        line = self._loop_with_totals(totals)._format_history_line()
+        # With hi != lo the spark must contain at least one of the range chars.
+        spark_chars = set("▁▂▃▄▅▆▇█")
+        self.assertTrue(any(c in line for c in spark_chars))
+        # The tall bar (▇ or █) must appear exactly once (for Feb), and a shorter
+        # bar for Jan — so both chars must be different.
+        found = [c for c in line if c in spark_chars]
+        self.assertEqual(len(found), 2)
+        self.assertNotEqual(found[0], found[1])
+
+    def test_current_month_excluded_from_sparkline(self):
+        # Data only in the current month should produce no sparkline.
+        today = main.today_str()
+        this_month_prefix = today[:7]
+        day1 = f"{this_month_prefix}-01"
+        totals = {day1: 7200, today: 3600}
+        line = self._loop_with_totals(totals)._format_history_line()
+        spark_chars = set("▁▂▃▄▅▆▇█")
+        self.assertFalse(any(c in line for c in spark_chars))
+
 
 class TestLiveStatus(unittest.TestCase):
     def test_loop_publishes_snapshot(self):

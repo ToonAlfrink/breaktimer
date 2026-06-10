@@ -5,6 +5,7 @@ import os
 import subprocess
 import threading
 import sys
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 import status
@@ -242,18 +243,24 @@ class TimerLoop:
     _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
     def _format_history_line(self):
-        """One line: today's hours, 7-day avg with delta, 28-day sparkline."""
+        """One line: today's hours, 7-day avg with delta, 12-month sparkline."""
         totals = self.state.daily_work_totals
         today = today_str()
+        today_month = today[:7]
         past_days = sorted(d for d in totals if d < today)
 
         today_h = totals.get(today, 0) / 3600
         week = past_days[-7:]
         avg_7d = sum(totals[d] for d in week) / len(week) / 3600 if week else 0
 
-        spark_days = past_days[-28:]
-        if spark_days:
-            vals = [totals[d] for d in spark_days]
+        # Monthly totals, excluding the current (partial) month.
+        monthly = defaultdict(float)
+        for d, v in totals.items():
+            if d[:7] != today_month:
+                monthly[d[:7]] += v
+        past_months = sorted(monthly)[-12:]
+        if past_months:
+            vals = [monthly[m] for m in past_months]
             lo, hi = min(vals), max(vals)
             if hi > lo:
                 spark = "".join(
@@ -261,7 +268,7 @@ class TimerLoop:
                     for v in vals
                 )
             else:
-                spark = self._SPARK_CHARS[4] * len(spark_days)
+                spark = self._SPARK_CHARS[4] * len(past_months)
         else:
             spark = ""
 
