@@ -166,10 +166,9 @@ class TimerLoop:
         self.activity_monitor = activity_monitor
         self.mana_max_seconds = mana_max_seconds
         self.mana_replenish_seconds = mana_replenish_seconds
-        self.last_loop_time = time.time() - offline_duration_seconds if offline_duration_seconds > 0 else time.time()
+        self.last_loop_time = time.time() - offline_duration_seconds
         self.last_save_time = time.time()
         self.last_adjustment_time = time.time()
-        self.state_lock = threading.Lock()
         self.grace_start = None
         self._status_write_warned = False
     
@@ -211,13 +210,6 @@ class TimerLoop:
             self.grace_start = None
         return False
     
-    def _update_state(self, current_loop_time, time_since_last_loop):
-        """Update timer state for one tick; returns True if shutdown fired."""
-        with self.state_lock:
-            self._update_activity_status(current_loop_time, time_since_last_loop)
-            self._adjust_timer(time_since_last_loop)
-            return self._check_shutdown()
-    
     def _apply_adjustments(self, remaining_fraction, current_loop_time):
         """Apply brightness and sensitivity adjustments if interval has elapsed."""
         if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
@@ -238,22 +230,20 @@ class TimerLoop:
             return
         if cmd.get("type") == "extend":
             secs = max(0.0, float(cmd.get("seconds", 600)))
-            with self.state_lock:
-                self.state.remaining_time = min(
-                    self.state.remaining_time + secs, self.mana_max_seconds
-                )
-                self.grace_start = None
+            self.state.remaining_time = min(
+                self.state.remaining_time + secs, self.mana_max_seconds
+            )
+            self.grace_start = None
 
     def _write_status(self):
         """Publish the live snapshot for ambient surfaces (see status.py)."""
-        with self.state_lock:
-            payload = {
-                "remaining_seconds": self.state.remaining_time,
-                "max_seconds": self.mana_max_seconds,
-                "is_active": self.state.is_active,
-                "grace_remaining": self._grace_remaining(),
-                "history": status.format_history_line(self.state.daily_work_totals),
-            }
+        payload = {
+            "remaining_seconds": self.state.remaining_time,
+            "max_seconds": self.mana_max_seconds,
+            "is_active": self.state.is_active,
+            "grace_remaining": self._grace_remaining(),
+            "history": status.format_history_line(self.state.daily_work_totals),
+        }
         try:
             status.write_status(payload)
         except OSError as e:
@@ -266,9 +256,11 @@ class TimerLoop:
         while True:
             current_loop_time = time.time()
             time_since_last_loop = current_loop_time - self.last_loop_time
-            
+
             self._check_commands()
-            if self._update_state(current_loop_time, time_since_last_loop):
+            self._update_activity_status(current_loop_time, time_since_last_loop)
+            self._adjust_timer(time_since_last_loop)
+            if self._check_shutdown():
                 sys.exit(0)
             
             remaining_fraction = self.state.remaining_time / self.mana_max_seconds
@@ -336,8 +328,7 @@ def main():
     save_original_sensitivity()
 
     offline_duration_seconds = compute_offline_duration_seconds(state)
-    if offline_duration_seconds > 0:
-        activity_monitor.set_last_activity_time(time.time() - offline_duration_seconds)
+    activity_monitor.set_last_activity_time(time.time() - offline_duration_seconds)
 
     try:
         timer_loop = TimerLoop(

@@ -6,16 +6,13 @@ _external_displays_cache = None
 
 def set_brightness(level):
     """Set screen brightness level (0-100)."""
-    if level is None:
-        return False
-    
     try:
-        subprocess.run(['brightnessctl', 'set', f'{level}%'], 
+        subprocess.run(['brightnessctl', 'set', f'{level}%'],
                       capture_output=True, timeout=2, check=True)
-        return True
+        return
     except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
         pass
-    
+
     try:
         backlight_paths = glob.glob('/sys/class/backlight/*/brightness')
         max_brightness_paths = glob.glob('/sys/class/backlight/*/max_brightness')
@@ -25,11 +22,8 @@ def set_brightness(level):
             brightness_value = int(max_brightness * level / 100)
             with open(backlight_paths[0], 'w') as f:
                 f.write(str(brightness_value))
-            return True
     except (IOError, PermissionError, ValueError):
         pass
-    
-    return False
 
 def get_external_displays():
     """Get list of external displays that support DDC/CI. Result is cached for the process lifetime."""
@@ -58,26 +52,15 @@ def get_external_displays():
 
 def set_external_brightness(display_num, level):
     """Set brightness of an external monitor via ddcutil (0-100)."""
-    if level is None:
-        return False
-    
     try:
-        subprocess.run(['ddcutil', 'setvcp', '10', str(int(level)), '--display', str(display_num)], 
+        subprocess.run(['ddcutil', 'setvcp', '10', str(int(level)), '--display', str(display_num)],
                       capture_output=True, timeout=5, check=True)
-        return True
     except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
         pass
-    
-    return False
 
 def set_brightness_by_fraction(fraction):
     """Set all displays' brightness to the remaining-time fraction (0.0 to 1.0)."""
     percentage = max(0, min(100, int(fraction * 100)))
-    
     set_brightness(percentage)
-    
-    external_displays = get_external_displays()
-    for display_num in external_displays:
+    for display_num in get_external_displays():
         set_external_brightness(display_num, percentage)
-    
-    return percentage

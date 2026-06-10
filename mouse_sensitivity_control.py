@@ -46,15 +46,10 @@ def _write_speed_to_file(path, value):
 
 
 def set_sensitivity(value):
-    """Set speed value in all COSMIC input configs (range -1.0 to 1.0). Returns False if no config files found."""
+    """Set speed value in all COSMIC input configs (range -1.0 to 1.0)."""
     value = round(max(-1.0, min(1.0, value)), 2)
-
-    if not any(os.path.exists(p) for p in CONFIG_FILES):
-        return False
-
     for path in CONFIG_FILES:
         _write_speed_to_file(path, value)
-    return True
 
 
 def save_original_sensitivity():
@@ -74,6 +69,4 @@ def restore_original_sensitivity():
 
 def set_sensitivity_by_fraction(fraction):
     """Set sensitivity based on remaining time fraction (0.0 to 1.0)."""
-    sensitivity = -1.0 + (fraction * 2.0)
-    set_sensitivity(sensitivity)
-    return sensitivity
+    set_sensitivity(-1.0 + fraction * 2.0)
