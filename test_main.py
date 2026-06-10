@@ -189,6 +189,78 @@ class TestInitializeState(InTempDir):
         self.assertEqual(state.remaining_time, 3600)
 
 
+class TestGraceRemaining(unittest.TestCase):
+    def test_returns_none_when_not_in_grace(self):
+        self.assertIsNone(make_loop(100)._grace_remaining())
+
+    def test_returns_countdown_during_grace(self):
+        loop = make_loop(0)
+        loop.grace_start = time.time() - 10
+        self.assertAlmostEqual(loop._grace_remaining(), TimerLoop.GRACE_SECONDS - 10, delta=1)
+
+    def test_clamps_at_zero_when_elapsed(self):
+        loop = make_loop(0)
+        loop.grace_start = time.time() - TimerLoop.GRACE_SECONDS - 10
+        self.assertEqual(loop._grace_remaining(), 0.0)
+
+
+class TestWriteStatusOSError(unittest.TestCase):
+    def test_warns_once_then_silent(self):
+        import io
+        loop = make_loop(900)
+        with mock.patch("status.write_status", side_effect=OSError("no tmpfs")):
+            buf = io.StringIO()
+            with mock.patch("sys.stderr", buf):
+                loop._write_status()
+                after_first = buf.getvalue()
+                loop._write_status()
+                after_second = buf.getvalue()
+        self.assertIn("WARNING", after_first)
+        self.assertEqual(after_first, after_second)  # no new output on second call
+
+
+class TestFormatHistoryLine(unittest.TestCase):
+    def _loop_with_totals(self, totals):
+        loop = make_loop(3600)
+        loop.state.daily_work_totals = totals
+        return loop
+
+    def test_empty_history_shows_today_only(self):
+        line = self._loop_with_totals({})._format_history_line()
+        self.assertIn("today", line)
+        self.assertNotIn("avg", line)
+
+    def test_today_only_no_avg_no_spark(self):
+        loop = self._loop_with_totals({main.today_str(): 3600})
+        line = loop._format_history_line()
+        self.assertIn("today", line)
+        self.assertNotIn("avg", line)
+
+    def test_past_days_include_avg(self):
+        totals = {"2026-01-01": 7200, main.today_str(): 3600}
+        line = self._loop_with_totals(totals)._format_history_line()
+        self.assertIn("avg", line)
+
+    def test_flat_spark_uses_mid_character(self):
+        # When hi==lo, all spark chars should be the same (index 4 = "▅")
+        past = {f"2026-01-{d:02d}": 3600 for d in range(1, 10)}
+        line = self._loop_with_totals(past)._format_history_line()
+        self.assertIn("▅", line)
+
+    def test_below_avg_shows_negative_delta(self):
+        # 7 past days at 4h each → avg 4h; today 0.5h → delta -3.5h
+        past = {f"2026-01-{d:02d}": 14400 for d in range(1, 8)}
+        loop = self._loop_with_totals({**past, main.today_str(): 1800})
+        line = loop._format_history_line()
+        self.assertIn("-", line)
+
+    def test_above_avg_shows_plus_delta(self):
+        past = {f"2026-01-{d:02d}": 3600 for d in range(1, 8)}
+        loop = self._loop_with_totals({**past, main.today_str(): 14400})
+        line = loop._format_history_line()
+        self.assertIn("+", line)
+
+
 class TestLiveStatus(unittest.TestCase):
     def test_loop_publishes_snapshot(self):
         import status as status_mod

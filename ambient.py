@@ -140,7 +140,8 @@ class AmbientBar(Gtk.Window):
         if warning:
             self._text(cr, w / 2, h, warning, align="center", rgb=(255, 80, 80))
 
-    def _warning_text(self, s):
+    @staticmethod
+    def _warning_text(s):
         grace = s.get("grace_remaining")
         if grace is not None:
             return f"SHUTTING DOWN IN {format_time(grace)} — go idle to cancel"
