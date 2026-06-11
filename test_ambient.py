@@ -67,6 +67,44 @@ class TestCenterText(unittest.TestCase):
         text, _ = _detached_bar(hovered=True)._center_text(self.WARN)
         self.assertIn("save your work", text)
 
+    def test_day_limit_notice_when_refill_gone(self):
+        s = {"remaining_seconds": 50 * 60, "grace_remaining": None, "refill_rate": 0.0}
+        text, _ = _detached_bar()._center_text(s)
+        self.assertIn("day limit reached", text)
+
+    def test_warning_takes_priority_over_day_limit_notice(self):
+        s = {"remaining_seconds": 90, "grace_remaining": None, "refill_rate": 0.0}
+        text, _ = _detached_bar()._center_text(s)
+        self.assertIn("save your work", text)
+
+    def test_no_notice_while_refill_merely_slowed(self):
+        s = {"remaining_seconds": 50 * 60, "grace_remaining": None, "refill_rate": 0.5}
+        self.assertEqual(_detached_bar()._center_text(s), (None, None))
+
+
+class TestDayFatigueDisplay(unittest.TestCase):
+    def test_grace_text_honest_when_no_refill(self):
+        s = {"grace_remaining": 45.0, "remaining_seconds": 0, "refill_rate": 0.0}
+        text = AmbientBar._warning_text(s)
+        self.assertIn("DAY LIMIT", text)
+        self.assertNotIn("go idle", text)
+
+    def test_grace_text_offers_idle_escape_with_refill(self):
+        s = {"grace_remaining": 45.0, "remaining_seconds": 0, "refill_rate": 1.0}
+        self.assertIn("go idle", AmbientBar._warning_text(s))
+
+    def test_history_white_within_budget(self):
+        self.assertEqual(AmbientBar._history_rgb({"refill_rate": 1.0}), (255, 255, 255))
+
+    def test_history_amber_past_budget(self):
+        self.assertEqual(AmbientBar._history_rgb({"refill_rate": 0.5}), (255, 190, 80))
+
+    def test_history_red_at_limit(self):
+        self.assertEqual(AmbientBar._history_rgb({"refill_rate": 0.0}), (255, 80, 80))
+
+    def test_history_white_when_core_predates_fatigue(self):
+        self.assertEqual(AmbientBar._history_rgb({}), (255, 255, 255))
+
 
 class TestIsCritical(unittest.TestCase):
     def _bar_with_snapshot(self, snapshot):
@@ -93,6 +131,13 @@ class TestIsCritical(unittest.TestCase):
     def test_above_expand_threshold_not_critical(self):
         bar = self._bar_with_snapshot({"grace_remaining": None, "remaining_seconds": EXPAND_SECONDS + 1})
         self.assertFalse(bar.is_critical())
+
+    def test_no_refill_left_is_critical(self):
+        # past the daily limit the bar stays expanded for its final stretch
+        bar = self._bar_with_snapshot({"grace_remaining": None,
+                                       "remaining_seconds": EXPAND_SECONDS + 1,
+                                       "refill_rate": 0.0})
+        self.assertTrue(bar.is_critical())
 
 
 class TestBarManager(unittest.TestCase):

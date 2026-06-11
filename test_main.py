@@ -41,9 +41,14 @@ class StubMonitor:
         self._t = t
 
 
-def make_loop(remaining, max_seconds=3600, replenish_seconds=1200):
+def make_loop(remaining, max_seconds=3600, replenish_seconds=1200,
+              daily_budget_seconds=8 * 3600, daily_limit_seconds=10 * 3600,
+              today_total=None):
     state = TimerState(remaining_time=remaining)
-    return TimerLoop(state, 0, StubMonitor(), max_seconds, replenish_seconds)
+    if today_total is not None:
+        state.daily_work_totals[main.today_str()] = today_total
+    return TimerLoop(state, 0, StubMonitor(), max_seconds, replenish_seconds,
+                     daily_budget_seconds, daily_limit_seconds)
 
 
 class InTempDir(unittest.TestCase):
@@ -404,6 +409,115 @@ class TestCLI(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0,
                             "breaktimer extend must exit non-zero — the subcommand was removed")
+
+
+class TestRefillFatigue(unittest.TestCase):
+    """The day has gravity: idle refill decays past the daily budget and
+    stops at the daily limit, so an over-long day ends when the bar drains."""
+
+    def test_full_rate_below_budget(self):
+        self.assertEqual(make_loop(600, today_total=7 * 3600)._refill_multiplier(), 1.0)
+
+    def test_full_rate_at_budget(self):
+        self.assertEqual(make_loop(600, today_total=8 * 3600)._refill_multiplier(), 1.0)
+
+    def test_half_rate_midway_between_budget_and_limit(self):
+        self.assertAlmostEqual(make_loop(600, today_total=9 * 3600)._refill_multiplier(), 0.5)
+
+    def test_zero_rate_at_limit(self):
+        self.assertEqual(make_loop(600, today_total=10 * 3600)._refill_multiplier(), 0.0)
+
+    def test_zero_rate_beyond_limit(self):
+        self.assertEqual(make_loop(600, today_total=11 * 3600)._refill_multiplier(), 0.0)
+
+    def test_no_total_today_means_full_rate(self):
+        self.assertEqual(make_loop(600)._refill_multiplier(), 1.0)
+
+    def test_replenish_scaled_by_fatigue(self):
+        # 3x base refill at half fatigue → 1.5x
+        loop = make_loop(600, today_total=9 * 3600)
+        loop.state.is_active = False
+        loop._adjust_timer(10)
+        self.assertAlmostEqual(loop.state.remaining_time, 615)
+
+    def test_no_replenish_at_daily_limit(self):
+        loop = make_loop(600, today_total=10 * 3600)
+        loop.state.is_active = False
+        loop._adjust_timer(100)
+        self.assertEqual(loop.state.remaining_time, 600)
+
+    def test_active_depletion_unaffected_by_fatigue(self):
+        loop = make_loop(600, today_total=11 * 3600)
+        loop.state.is_active = True
+        loop._adjust_timer(10)
+        self.assertEqual(loop.state.remaining_time, 590)
+
+    def test_grace_not_cancellable_past_limit(self):
+        # idle no longer refills, so remaining stays 0 and grace runs out
+        loop = make_loop(0, today_total=10 * 3600)
+        loop.state.is_active = False
+        loop._adjust_timer(30)
+        with mock.patch.object(main, "execute_shutdown") as shutdown:
+            self.assertFalse(loop._check_shutdown())
+            self.assertIsNotNone(loop.grace_start)
+            loop.grace_start = time.time() - TimerLoop.GRACE_SECONDS - 1
+            with mock.patch.object(main, "save_state_to_file"):
+                self.assertTrue(loop._check_shutdown())
+        shutdown.assert_called_once()
+
+    def test_status_payload_includes_refill_rate(self):
+        loop = make_loop(600, today_total=9 * 3600)
+        with mock.patch.object(status, "write_status") as write:
+            loop._write_status()
+        self.assertAlmostEqual(write.call_args[0][0]["refill_rate"], 0.5)
+
+
+class TestDailyNotifications(unittest.TestCase):
+    def test_budget_crossing_fires_once(self):
+        loop = make_loop(600, today_total=8 * 3600 - 5)
+        loop.state.is_active = True
+        with mock.patch.object(main, "_notify") as notif:
+            loop._adjust_timer(10)
+            loop._check_notifications()
+            loop._adjust_timer(10)
+            loop._check_notifications()
+        budget_calls = [c for c in notif.call_args_list if "refill slower" in c.args[0]]
+        self.assertEqual(len(budget_calls), 1)
+        self.assertIn("8h worked today", budget_calls[0].args[0])
+
+    def test_limit_crossing_fires_critical(self):
+        loop = make_loop(600, today_total=10 * 3600 - 5)
+        loop.state.is_active = True
+        with mock.patch.object(main, "_notify") as notif:
+            loop._adjust_timer(10)
+            loop._check_notifications()
+        limit_calls = [c for c in notif.call_args_list if "no refill left" in c.args[0]]
+        self.assertEqual(len(limit_calls), 1)
+        self.assertEqual(limit_calls[0].kwargs.get("urgency"), "critical")
+
+    def test_no_startup_spam_when_already_past_thresholds(self):
+        loop = make_loop(600, today_total=11 * 3600)
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_notifications()
+        notif.assert_not_called()
+
+    def test_grace_message_honest_when_no_refill_left(self):
+        loop = make_loop(0, today_total=10 * 3600)
+        loop.grace_start = time.time()
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_notifications()
+        grace_calls = [c for c in notif.call_args_list if "Shutting down" in c.args[0]
+                       or "shutting down" in c.args[0]]
+        self.assertEqual(len(grace_calls), 1)
+        self.assertNotIn("go idle", grace_calls[0].args[0])
+        self.assertIn("Day limit", grace_calls[0].args[0])
+
+    def test_grace_message_offers_idle_escape_below_limit(self):
+        loop = make_loop(0, today_total=3600)
+        loop.grace_start = time.time()
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_notifications()
+        self.assertIn("go idle to cancel", notif.call_args.args[0])
 
 
 if __name__ == "__main__":

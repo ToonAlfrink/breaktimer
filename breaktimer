@@ -25,6 +25,11 @@ def cmd_status():
     active = "●" if s["is_active"] else "○"
     remaining = status.format_time(s["remaining_seconds"])
     print(f"{remaining} {active}  {s.get('history', '')}")
+    rate = s.get("refill_rate", 1.0)
+    if rate <= 0:
+        print("day limit reached — no refill left today")
+    elif rate < 1:
+        print(f"past daily budget — breaks refill at {round(rate * 100)}%")
     pause_left = brightness_control.pause_until() - time.time()
     if pause_left > 0:
         print(f"brightness control off for another {status.format_time(pause_left)}")

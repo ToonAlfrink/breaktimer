@@ -110,7 +110,8 @@ class AmbientBar(Gtk.Window):
         if not s:
             return False
         return (s.get("grace_remaining") is not None
-                or s["remaining_seconds"] < EXPAND_SECONDS)
+                or s["remaining_seconds"] < EXPAND_SECONDS
+                or s.get("refill_rate", 1.0) <= 0)  # past the daily limit: stay expanded
 
     def target_height(self):
         return EXPANDED_HEIGHT if (self.hovered or self.is_critical()) else STRIP_HEIGHT
@@ -155,20 +156,38 @@ class AmbientBar(Gtk.Window):
 
         history = s.get("history")
         if history:
-            self._text(cr, w - 8, h, history, align="right")
+            self._text(cr, w - 8, h, history, align="right",
+                       rgb=self._history_rgb(s))
 
         center, rgb = self._center_text(s)
         if center:
             self._text(cr, w / 2, h, center, align="center", rgb=rgb)
 
+    @staticmethod
+    def _history_rgb(s):
+        """History text mirrors the day's fatigue: white in budget, amber past
+        the budget, red once refill is gone."""
+        rate = s.get("refill_rate", 1.0)
+        if rate <= 0:
+            return (255, 80, 80)
+        if rate < 1:
+            return (255, 190, 80)
+        return (255, 255, 255)
+
     def _center_text(self, s):
         warning = self._warning_text(s)
-        return (warning, (255, 80, 80)) if warning else (None, None)
+        if warning:
+            return warning, (255, 80, 80)
+        if s.get("refill_rate", 1.0) <= 0:
+            return "day limit reached — no refill", (255, 190, 80)
+        return None, None
 
     @staticmethod
     def _warning_text(s):
         grace = s.get("grace_remaining")
         if grace is not None:
+            if s.get("refill_rate", 1.0) <= 0:
+                return f"DAY LIMIT — SHUTTING DOWN IN {format_time(grace)}"
             return f"SHUTTING DOWN IN {format_time(grace)} — go idle to cancel"
         remaining = s["remaining_seconds"]
         if remaining < 2 * 60:
