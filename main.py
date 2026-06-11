@@ -190,7 +190,13 @@ class TimerLoop:
         self.last_adjustment_time = time.time()
         self.grace_start = None
         self._status_write_warned = False
-        self._notified = set()
+        # Pre-populate with thresholds already crossed so a restart below a level
+        # doesn't re-fire notifications the user already saw in the previous process.
+        self._notified = {
+            threshold
+            for threshold, _, _ in _NOTIFY_THRESHOLDS
+            if self.state.remaining_time <= threshold
+        }
     
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
         """Update activity detection status based on user input."""

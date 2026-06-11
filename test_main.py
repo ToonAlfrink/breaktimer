@@ -272,7 +272,7 @@ class TestNotifications(unittest.TestCase):
     def test_fires_at_2min_threshold(self):
         loop = make_loop(121)
         with mock.patch.object(main, "_notify"):
-            loop._check_notifications()  # fires 10-min
+            loop._check_notifications()  # fires 10-min and 5-min (both thresholds crossed)
         loop.state.remaining_time = 119
         with mock.patch.object(main, "_notify") as notif:
             loop._check_notifications()
@@ -280,7 +280,9 @@ class TestNotifications(unittest.TestCase):
         self.assertEqual(notif.call_args[1]["urgency"], "critical")
 
     def test_doesnt_refire_on_repeated_ticks_below_threshold(self):
-        loop = make_loop(599)
+        # Cross the threshold from above, then verify no second notification.
+        loop = make_loop(601)
+        loop.state.remaining_time = 599
         with mock.patch.object(main, "_notify") as notif:
             loop._check_notifications()
             loop._check_notifications()
@@ -329,6 +331,51 @@ class TestNotifications(unittest.TestCase):
         loop = make_loop(599)
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
             loop._check_notifications()  # must not raise
+
+    def test_no_startup_spam_when_already_below_threshold(self):
+        # Process restart while remaining < all thresholds must not re-fire
+        # notifications the user already saw before the crash.
+        loop = make_loop(90)  # below 10-min, 5-min, and 2-min
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_notifications()
+        notif.assert_not_called()
+
+    def test_startup_below_one_threshold_fires_only_new_descent(self):
+        # Started at 400s (below 10-min but above 5-min): 10-min pre-populated,
+        # so no notification until timer crosses the 5-min level.
+        loop = make_loop(400)
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_notifications()
+        notif.assert_not_called()
+
+        loop.state.remaining_time = 299
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_notifications()
+        notif.assert_called_once()
+        self.assertIn("5 minutes", notif.call_args[0][0])
+
+    def test_extend_during_grace_allows_grace_notification_to_refire(self):
+        # After extend cancels grace, a new grace window should fire the notification.
+        loop = make_loop(0)
+        loop.grace_start = time.time() - 5
+        with mock.patch.object(main, "_notify"):
+            loop._check_notifications()
+        self.assertIn("grace", loop._notified)
+
+        # Extend brings remaining back up; _check_commands sets grace_start=None
+        loop.state.remaining_time = 300
+        loop.grace_start = None
+        with mock.patch.object(main, "_notify"):
+            loop._check_notifications()
+        self.assertNotIn("grace", loop._notified)
+
+        # Timer depletes to 0 again and grace restarts
+        loop.state.remaining_time = 0
+        loop.grace_start = time.time() - 2
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_notifications()
+        grace_calls = [c[0][0] for c in notif.call_args_list if "Shutting down" in c[0][0]]
+        self.assertEqual(len(grace_calls), 1)
 
 
 class TestWriteStatusOSError(unittest.TestCase):
