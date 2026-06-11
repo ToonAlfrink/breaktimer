@@ -14,7 +14,9 @@ a terminal window.
   bottom) that changes colour (blue → cyan → yellow → red); it expands with detail
   text (time remaining, work history) on hover or when time runs low, and shows the
   60s shutdown-grace countdown.
-- **Left-click** the bar to extend by 10 minutes (cancels any active grace window).
+- **Left-click** the bar to extend by 10 minutes (cancels any active grace window);
+  hovering shows a `click: +10 min` hint, and each click flashes a green running
+  total (`+10 min`, `+20 min`, …) as instant confirmation.
 - Persists state to `state.json` so it survives restarts.
 - Managed by two systemd user services that auto-start and restart on crash.
 
