@@ -196,6 +196,66 @@ class TestInitializeState(InTempDir):
         state = initialize_state(self._args(start_minutes=120), 3600)
         self.assertEqual(state.remaining_time, 3600)
 
+    def test_saved_zero_not_inflated_to_cap(self):
+        # remaining_time=0 saved before a limit-triggered shutdown must survive
+        # a service restart unchanged — this is what makes re-shut-on-login work.
+        save_state_to_file(TimerState(remaining_time=0))
+        state = initialize_state(self._args(), 3600)
+        self.assertEqual(state.remaining_time, 0)
+
+
+class TestExecuteShutdown(unittest.TestCase):
+    """execute_shutdown tries three commands in order; all must be tested."""
+
+    def test_first_command_is_sudo(self):
+        with mock.patch("subprocess.run") as run:
+            main.execute_shutdown()
+        self.assertEqual(run.call_args_list[0].args[0][0], "sudo")
+
+    def test_falls_through_on_failure(self):
+        calls = []
+        def side_effect(cmd, **kw):
+            calls.append(cmd[0])
+            if cmd[0] != "systemctl":
+                raise subprocess.CalledProcessError(1, cmd)
+        with mock.patch("subprocess.run", side_effect=side_effect):
+            main.execute_shutdown()
+        self.assertEqual(calls, ["sudo", "shutdown", "systemctl"])
+
+    def test_all_fail_logs_error_to_stderr(self):
+        import io
+        buf = io.StringIO()
+        with mock.patch("subprocess.run",
+                        side_effect=subprocess.CalledProcessError(1, [])):
+            with mock.patch("sys.stderr", buf):
+                main.execute_shutdown()
+        self.assertIn("ERROR", buf.getvalue())
+
+
+class TestRestartAfterShutdown(InTempDir):
+    """Service restarts on login with remaining_time=0 saved — it must re-enter
+    the grace window and power off again until midnight resets the daily total."""
+
+    def test_restart_at_zero_past_limit_enters_grace(self):
+        state = TimerState(remaining_time=0)
+        state.daily_work_totals[main.today_str()] = 10 * 3600
+        save_state_to_file(state)
+        loaded = load_state_from_file()
+
+        loop = TimerLoop(loaded, 0, StubMonitor(), 3600, 1200, 8 * 3600, 10 * 3600)
+        loop.state.is_active = False
+        loop._adjust_timer(1)
+        with mock.patch.object(main, "execute_shutdown"):
+            loop._check_shutdown()
+        self.assertIsNotNone(loop.grace_start,
+                             "grace must start on restart at zero past the daily limit")
+
+    def test_yesterday_limit_does_not_block_today(self):
+        # A large total filed under a past date must not throttle today's refill.
+        loop = make_loop(600)
+        loop.state.daily_work_totals["2000-01-01"] = 11 * 3600
+        self.assertEqual(loop._refill_multiplier(), 1.0)
+
 
 class TestGraceRemaining(unittest.TestCase):
     def test_returns_none_when_not_in_grace(self):
