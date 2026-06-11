@@ -160,5 +160,26 @@ class TestFormatHistoryLine(unittest.TestCase):
         self.assertFalse(any(c in line for c in "▁▂▃▄▅▆▇█"))
 
 
+class TestNoCommandChannel(unittest.TestCase):
+    """Pin the invariant: status.py has no IPC surface for time extension.
+
+    The command channel (command_path / write_command / read_command) was
+    deleted in commit 70fe335 along with the rest of the extend pathway.
+    These tests catch any attempt to re-introduce it.
+    """
+
+    def test_no_command_path(self):
+        self.assertFalse(hasattr(status, "command_path"),
+                         "command channel was removed — command_path must not exist")
+
+    def test_no_write_command(self):
+        self.assertFalse(hasattr(status, "write_command"),
+                         "command channel was removed — write_command must not exist")
+
+    def test_no_read_command(self):
+        self.assertFalse(hasattr(status, "read_command"),
+                         "command channel was removed — read_command must not exist")
+
+
 if __name__ == "__main__":
     unittest.main()

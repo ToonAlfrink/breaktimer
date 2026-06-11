@@ -9,6 +9,8 @@ Run: python3 -m unittest -q
 import argparse
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -364,6 +366,44 @@ class TestLiveStatus(unittest.TestCase):
         self.assertEqual(snap["max_seconds"], 3600)
         self.assertAlmostEqual(snap["grace_remaining"], 50, delta=2)
         self.assertIn("history", snap)
+
+
+class TestUnconditionalLimit(unittest.TestCase):
+    """Pin the invariant: the timer limit cannot be extended externally.
+
+    Capability stripped the entire extend pathway (command channel, extend
+    handler, click UI) in commit 70fe335. These tests make it impossible to
+    accidentally re-introduce an escape hatch without breaking the suite.
+    """
+
+    def test_no_extend_method_on_timer_loop(self):
+        self.assertFalse(hasattr(TimerLoop, "extend"),
+                         "TimerLoop must have no extend method — the limit is unconditional")
+
+    def test_no_check_commands_method_on_timer_loop(self):
+        self.assertFalse(hasattr(TimerLoop, "_check_commands"),
+                         "TimerLoop must not poll a command channel — polling was removed with extend")
+
+    def test_active_timer_strictly_depletes(self):
+        loop = make_loop(600)
+        loop.state.is_active = True
+        for _ in range(5):
+            before = loop.state.remaining_time
+            loop._adjust_timer(10)
+            self.assertLess(loop.state.remaining_time, before,
+                            "each active tick must decrease remaining_time — no silent refill")
+
+
+class TestCLI(unittest.TestCase):
+    _CLI = os.path.join(os.path.dirname(os.path.abspath(main.__file__)), "breaktimer")
+
+    def test_extend_subcommand_exits_nonzero(self):
+        result = subprocess.run(
+            [sys.executable, self._CLI, "extend"],
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0,
+                            "breaktimer extend must exit non-zero — the subcommand was removed")
 
 
 if __name__ == "__main__":
