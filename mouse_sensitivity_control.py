@@ -53,7 +53,6 @@ def set_sensitivity(value):
 
 
 def save_original_sensitivity():
-    """Store original sensitivity values for all known input config files."""
     global _original_sensitivity
     _original_sensitivity = {}
     for path in CONFIG_FILES:
@@ -63,7 +62,6 @@ def save_original_sensitivity():
 
 
 def restore_original_sensitivity():
-    """Restore saved sensitivity values for all known input config files."""
     for path, value in _original_sensitivity.items():
         _write_speed_to_file(path, value)
 

@@ -51,7 +51,6 @@ class TimerState:
 
     @classmethod
     def from_dict(cls, data):
-        """Create from dictionary loaded from JSON."""
         return cls(
             remaining_time=data.get("remaining_time", float("inf")),
             daily_work_totals=data.get("daily_work_totals", {}),
@@ -60,8 +59,6 @@ class TimerState:
 
 
 class ActivityMonitor:
-    """Encapsulates activity detection via libinput monitoring."""
-    
     def __init__(self):
         self.last_activity_time = time.time()
         self.is_running = False
@@ -70,30 +67,25 @@ class ActivityMonitor:
         self.lock = threading.Lock()
     
     def start(self):
-        """Start the activity monitoring thread."""
         self.is_running = True
         self.monitor_thread = threading.Thread(target=self._monitor_thread, daemon=True)
         self.monitor_thread.start()
     
     def stop(self):
-        """Stop the activity monitoring thread."""
         self.is_running = False
         if self.libinput_process:
             self.libinput_process.terminate()
             self.libinput_process.wait()
     
     def get_last_activity_time(self):
-        """Get the timestamp of the last detected activity."""
         with self.lock:
             return self.last_activity_time
     
     def set_last_activity_time(self, timestamp):
-        """Set the timestamp of the last detected activity."""
         with self.lock:
             self.last_activity_time = timestamp
     
     def _monitor_thread(self):
-        """Background thread to continuously monitor libinput events."""
         try:
             self.libinput_process = subprocess.Popen(
                 ['libinput', 'debug-events'],
@@ -101,7 +93,6 @@ class ActivityMonitor:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
             )
             
             for line in self.libinput_process.stdout:
@@ -132,7 +123,6 @@ def save_state_to_file(state):
     os.replace(tmp_path, STATE_FILE)
 
 def load_state_from_file():
-    """Loads the state from a JSON file. Returns None if file not found or corrupt."""
     if not os.path.exists(STATE_FILE):
         return None
     try:
@@ -144,18 +134,11 @@ def load_state_from_file():
         return None
 
 def compute_offline_duration_seconds(state):
-    """Compute time elapsed since the last persisted state, used to treat downtime as idle.
-
-    Prefers the explicit 'last_saved_time' we persist, with a fallback to the
-    filesystem modification time of the state file if that key is missing.
-    """
-    saved_epoch = state.last_saved_time
-    if not saved_epoch and os.path.exists(STATE_FILE):
-        saved_epoch = os.path.getmtime(STATE_FILE)
-    return max(0.0, time.time() - saved_epoch) if saved_epoch else 0.0
+    if not state.last_saved_time:
+        return 0.0
+    return max(0.0, time.time() - state.last_saved_time)
 
 def execute_shutdown():
-    """Execute system shutdown command. Logs to stderr if all attempts fail."""
     shutdown_commands = [
         ['sudo', '-n', 'shutdown', '-h', 'now'],
         ['shutdown', '-h', 'now'],
@@ -199,7 +182,6 @@ class TimerLoop:
         }
     
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
-        """Update activity detection status based on user input."""
         last_activity_time = self.activity_monitor.get_last_activity_time()
         elapsed = current_loop_time - last_activity_time
 
@@ -210,7 +192,6 @@ class TimerLoop:
             self.state.is_active = elapsed <= self.ACTIVITY_THRESHOLD_SECONDS
     
     def _adjust_timer(self, time_since_last_loop):
-        """Adjust remaining time based on activity status."""
         today = today_str()
         if self.state.is_active:
             self.state.remaining_time -= time_since_last_loop
@@ -221,7 +202,6 @@ class TimerLoop:
             self.state.remaining_time = min(self.state.remaining_time, self.mana_max_seconds)
     
     def _check_shutdown(self):
-        """Check if timer reached zero; enter grace window, then shutdown."""
         if self.state.remaining_time <= 0:
             self.state.remaining_time = 0.0
             now = time.time()
@@ -237,7 +217,6 @@ class TimerLoop:
         return False
     
     def _apply_adjustments(self, remaining_fraction, current_loop_time):
-        """Apply brightness and sensitivity adjustments if interval has elapsed."""
         if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
             set_brightness_by_fraction(remaining_fraction)
             set_sensitivity_by_fraction(remaining_fraction)
@@ -250,7 +229,6 @@ class TimerLoop:
         return max(0.0, self.GRACE_SECONDS - (time.time() - self.grace_start))
 
     def _check_notifications(self):
-        """Fire desktop notifications when the timer crosses key thresholds."""
         remaining = self.state.remaining_time
         grace = self._grace_remaining()
 
@@ -271,7 +249,6 @@ class TimerLoop:
                 self._notified.discard(threshold)
 
     def _check_commands(self):
-        """Apply any pending command from the control channel."""
         cmd = status.read_and_clear_command()
         if not cmd:
             return
@@ -299,7 +276,6 @@ class TimerLoop:
                 self._status_write_warned = True
 
     def run(self):
-        """Execute the main timer loop."""
         while True:
             current_loop_time = time.time()
             time_since_last_loop = current_loop_time - self.last_loop_time
@@ -324,13 +300,12 @@ class TimerLoop:
 
 
 def parse_arguments():
-    """Parses command-line arguments for the countdown timer."""
     parser = argparse.ArgumentParser(description="A countdown timer with activity tracking.")
     parser.add_argument(
         "--start-minutes",
         type=float,
         default=None,
-        help="Starting remaining time in minutes (default: 60 minutes = 1 hour)."
+        help="Override starting time in minutes (default: starts at --deplete-minutes cap)."
     )
     parser.add_argument(
         "--deplete-minutes",
@@ -358,7 +333,6 @@ def initialize_state(args, mana_max_seconds):
     return state
 
 def main():
-    """Main function to run the countdown timer."""
     lock = status.acquire_singleton_lock("core")
     if lock is None:
         print("breaktimer core already running — exiting", file=sys.stderr)

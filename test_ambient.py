@@ -91,21 +91,21 @@ class TestBarManager(unittest.TestCase):
     def test_add_creates_bar(self):
         mgr, created = self._setup()
         mgr.add("mon1")
-        self.assertEqual(mgr.count(), 1)
+        self.assertEqual(len(mgr._bars), 1)
         self.assertEqual(len(created), 1)
 
     def test_add_same_monitor_twice_is_idempotent(self):
         mgr, created = self._setup()
         mgr.add("mon1")
         mgr.add("mon1")
-        self.assertEqual(mgr.count(), 1)
+        self.assertEqual(len(mgr._bars), 1)
         self.assertEqual(len(created), 1)
 
     def test_add_multiple_monitors(self):
         mgr, created = self._setup()
         mgr.add("mon1")
         mgr.add("mon2")
-        self.assertEqual(mgr.count(), 2)
+        self.assertEqual(len(mgr._bars), 2)
         self.assertEqual(len(created), 2)
 
     def test_remove_destroys_bar_and_decrements_count(self):
@@ -113,12 +113,12 @@ class TestBarManager(unittest.TestCase):
         mgr.add("mon1")
         mgr.remove("mon1")
         self.assertTrue(created[0].destroyed)
-        self.assertEqual(mgr.count(), 0)
+        self.assertEqual(len(mgr._bars), 0)
 
     def test_remove_nonexistent_is_noop(self):
         mgr, _ = self._setup()
         mgr.remove("never-added")  # must not raise
-        self.assertEqual(mgr.count(), 0)
+        self.assertEqual(len(mgr._bars), 0)
 
     def test_remove_all_monitors_does_not_quit(self):
         # Regression: removing the last monitor used to call Gtk.main_quit(),
@@ -127,7 +127,7 @@ class TestBarManager(unittest.TestCase):
         mgr, _ = self._setup()
         mgr.add("mon1")
         mgr.remove("mon1")
-        self.assertEqual(mgr.count(), 0)
+        self.assertEqual(len(mgr._bars), 0)
         # If we get here, Gtk.main_quit() was NOT called (no GTK is running).
 
     def test_reconnected_monitor_gets_new_bar(self):
@@ -135,7 +135,7 @@ class TestBarManager(unittest.TestCase):
         mgr.add("mon1")
         mgr.remove("mon1")
         mgr.add("mon1")
-        self.assertEqual(mgr.count(), 1)
+        self.assertEqual(len(mgr._bars), 1)
         self.assertEqual(len(created), 2)
         self.assertFalse(created[1].destroyed)
 

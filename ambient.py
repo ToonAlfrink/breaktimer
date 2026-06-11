@@ -221,9 +221,6 @@ class BarManager:
         if bar is not None:
             bar.destroy()
 
-    def count(self):
-        return len(self._bars)
-
 
 def main():
     lock = status.acquire_singleton_lock("ambient")
