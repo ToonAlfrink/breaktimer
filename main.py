@@ -248,17 +248,6 @@ class TimerLoop:
             else:
                 self._notified.discard(threshold)
 
-    def _check_commands(self):
-        cmd = status.read_and_clear_command()
-        if not cmd:
-            return
-        if cmd.get("type") == "extend":
-            secs = max(0.0, float(cmd.get("seconds", 600)))
-            self.state.remaining_time = min(
-                self.state.remaining_time + secs, self.mana_max_seconds
-            )
-            self.grace_start = None
-
     def _write_status(self):
         """Publish the live snapshot for ambient surfaces (see status.py)."""
         payload = {
@@ -280,7 +269,6 @@ class TimerLoop:
             current_loop_time = time.time()
             time_since_last_loop = current_loop_time - self.last_loop_time
 
-            self._check_commands()
             self._update_activity_status(current_loop_time, time_since_last_loop)
             self._adjust_timer(time_since_last_loop)
             if self._check_shutdown():

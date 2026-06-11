@@ -205,47 +205,6 @@ class TestGraceRemaining(unittest.TestCase):
         self.assertEqual(loop._grace_remaining(), 0.0)
 
 
-class TestExtendCommand(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self._env = mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": self._tmp.name})
-        self._env.start()
-
-    def tearDown(self):
-        self._env.stop()
-        self._tmp.cleanup()
-
-    def test_extend_adds_seconds(self):
-        status.write_command({"type": "extend", "seconds": 600})
-        loop = make_loop(300)
-        loop._check_commands()
-        self.assertEqual(loop.state.remaining_time, 900)
-
-    def test_extend_clamped_at_max(self):
-        status.write_command({"type": "extend", "seconds": 600})
-        loop = make_loop(3500)
-        loop._check_commands()
-        self.assertEqual(loop.state.remaining_time, 3600)
-
-    def test_extend_cancels_grace(self):
-        status.write_command({"type": "extend", "seconds": 600})
-        loop = make_loop(0)
-        loop.grace_start = time.time()
-        loop._check_commands()
-        self.assertIsNone(loop.grace_start)
-
-    def test_no_command_is_noop(self):
-        loop = make_loop(300)
-        loop._check_commands()
-        self.assertEqual(loop.state.remaining_time, 300)
-
-    def test_unknown_command_type_ignored(self):
-        status.write_command({"type": "frobnicate"})
-        loop = make_loop(300)
-        loop._check_commands()
-        self.assertEqual(loop.state.remaining_time, 300)
-
-
 class TestNotifications(unittest.TestCase):
     def test_fires_at_10min_threshold(self):
         loop = make_loop(601)
@@ -354,22 +313,21 @@ class TestNotifications(unittest.TestCase):
         notif.assert_called_once()
         self.assertIn("5 minutes", notif.call_args[0][0])
 
-    def test_extend_during_grace_allows_grace_notification_to_refire(self):
-        # After extend cancels grace, a new grace window should fire the notification.
+    def test_grace_notification_refires_after_grace_cancelled_and_new_grace_starts(self):
         loop = make_loop(0)
         loop.grace_start = time.time() - 5
         with mock.patch.object(main, "_notify"):
             loop._check_notifications()
         self.assertIn("grace", loop._notified)
 
-        # Extend brings remaining back up; _check_commands sets grace_start=None
+        # idle refill cancels the grace window
         loop.state.remaining_time = 300
         loop.grace_start = None
         with mock.patch.object(main, "_notify"):
             loop._check_notifications()
         self.assertNotIn("grace", loop._notified)
 
-        # Timer depletes to 0 again and grace restarts
+        # timer depletes to 0 again and a new grace window opens
         loop.state.remaining_time = 0
         loop.grace_start = time.time() - 2
         with mock.patch.object(main, "_notify") as notif:

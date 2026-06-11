@@ -44,7 +44,6 @@ EXPANDED_HEIGHT = 28
 EXPAND_SECONDS = 10 * 60   # bar expands and shows time at this threshold
 WARN_SECONDS = 5 * 60      # warning text ("wrap up", "save") appears below this
 PULSE_MS = 500             # grace-mode background pulse interval
-FLASH_SECONDS = 1.8        # how long the click-to-extend confirmation shows
 FONT = Pango.FontDescription("monospace 10")
 
 
@@ -54,8 +53,6 @@ class AmbientBar(Gtk.Window):
         self.snapshot = None
         self.hovered = False
         self._pulse = False
-        self._flash_until = 0.0
-        self._flash_minutes = 0
 
         GtkLayerShell.init_for_window(self)
         GtkLayerShell.set_namespace(self, "breaktimer")
@@ -77,12 +74,9 @@ class AmbientBar(Gtk.Window):
         self.add(self.area)
 
         self.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK
-                        | Gdk.EventMask.LEAVE_NOTIFY_MASK
-                        | Gdk.EventMask.BUTTON_PRESS_MASK)
-        self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+                        | Gdk.EventMask.LEAVE_NOTIFY_MASK)
         self.connect("enter-notify-event", self.on_hover, True)
         self.connect("leave-notify-event", self.on_hover, False)
-        self.connect("button-press-event", self.on_click)
 
         self.set_size_request(-1, STRIP_HEIGHT)
         GLib.timeout_add(1000, self.refresh)
@@ -106,28 +100,6 @@ class AmbientBar(Gtk.Window):
         self.area.queue_draw()
         return True  # keep the GLib timer alive
 
-    def on_click(self, _widget, event):
-        if event.button == 1:
-            status.write_command({"type": "extend", "seconds": 600})
-            # Instant confirmation — the core round-trips the command in up to
-            # ~2s, far too long for a click to feel acknowledged. Rapid clicks
-            # accumulate into one running total.
-            now = time.monotonic()
-            self._flash_minutes = self._flash_minutes + 10 if now < self._flash_until else 10
-            self._flash_until = now + FLASH_SECONDS
-            self.set_size_request(-1, self.target_height())
-            self.area.queue_draw()
-            GLib.timeout_add(int(FLASH_SECONDS * 1000) + 50, self._end_flash)
-
-    def _end_flash(self):
-        if time.monotonic() >= self._flash_until:
-            self.set_size_request(-1, self.target_height())
-            self.area.queue_draw()
-        return False
-
-    def is_flashing(self):
-        return time.monotonic() < self._flash_until
-
     def on_hover(self, _widget, _event, entered):
         self.hovered = entered
         self.set_size_request(-1, self.target_height())
@@ -141,8 +113,7 @@ class AmbientBar(Gtk.Window):
                 or s["remaining_seconds"] < EXPAND_SECONDS)
 
     def target_height(self):
-        expanded = self.hovered or self.is_critical() or self.is_flashing()
-        return EXPANDED_HEIGHT if expanded else STRIP_HEIGHT
+        return EXPANDED_HEIGHT if (self.hovered or self.is_critical()) else STRIP_HEIGHT
 
     # -- drawing ----------------------------------------------------------
     def on_draw(self, area, cr):
@@ -191,22 +162,14 @@ class AmbientBar(Gtk.Window):
             self._text(cr, w / 2, h, center, align="center", rgb=rgb)
 
     def _center_text(self, s):
-        """(text, rgb) for the bar's center slot: click feedback wins over
-        warnings, warnings over the hover hint."""
-        if self.is_flashing():
-            return f"+{self._flash_minutes} min", (140, 235, 140)
         warning = self._warning_text(s)
-        if warning:
-            return warning, (255, 80, 80)
-        if self.hovered:
-            return "click: +10 min", (170, 170, 170)
-        return None, None
+        return (warning, (255, 80, 80)) if warning else (None, None)
 
     @staticmethod
     def _warning_text(s):
         grace = s.get("grace_remaining")
         if grace is not None:
-            return f"SHUTTING DOWN IN {format_time(grace)} — click for +10 min or go idle"
+            return f"SHUTTING DOWN IN {format_time(grace)} — go idle to cancel"
         remaining = s["remaining_seconds"]
         if remaining < 2 * 60:
             return "⚠ save your work now"

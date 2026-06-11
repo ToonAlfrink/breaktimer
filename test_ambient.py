@@ -12,12 +12,11 @@ from ambient import AmbientBar, BarManager, EXPAND_SECONDS, WARN_SECONDS
 
 
 class TestWarningText(unittest.TestCase):
-    def test_grace_mode_shows_countdown_and_both_escapes(self):
+    def test_grace_mode_shows_countdown(self):
         s = {"grace_remaining": 45.0, "remaining_seconds": 0}
         text = AmbientBar._warning_text(s)
         self.assertIn("SHUTTING DOWN", text)
         self.assertIn("0:45", text)
-        self.assertIn("+10 min", text)
         self.assertIn("go idle", text)
 
     def test_under_2min_shows_save_warning(self):
@@ -43,16 +42,13 @@ class TestWarningText(unittest.TestCase):
         self.assertIn("SHUTTING DOWN", text)
 
 
-def _detached_bar(hovered=False, flash_until=0.0, flash_minutes=0):
+def _detached_bar(hovered=False):
     """A minimal stand-in wired to the real AmbientBar methods, no GTK needed."""
     class FakeBar:
         pass
     bar = FakeBar()
     bar.hovered = hovered
-    bar._flash_until = flash_until
-    bar._flash_minutes = flash_minutes
-    for name in ("is_flashing", "_center_text"):
-        setattr(bar, name, getattr(AmbientBar, name).__get__(bar, FakeBar))
+    bar._center_text = AmbientBar._center_text.__get__(bar, FakeBar)
     bar._warning_text = AmbientBar._warning_text
     return bar
 
@@ -64,28 +60,12 @@ class TestCenterText(unittest.TestCase):
     def test_empty_when_calm_and_unhovered(self):
         self.assertEqual(_detached_bar()._center_text(self.CALM), (None, None))
 
-    def test_hover_shows_click_hint(self):
-        text, _ = _detached_bar(hovered=True)._center_text(self.CALM)
-        self.assertEqual(text, "click: +10 min")
+    def test_empty_when_calm_and_hovered(self):
+        self.assertEqual(_detached_bar(hovered=True)._center_text(self.CALM), (None, None))
 
-    def test_warning_beats_hover_hint(self):
+    def test_warning_shows_when_hovered(self):
         text, _ = _detached_bar(hovered=True)._center_text(self.WARN)
         self.assertIn("save your work", text)
-
-    def test_click_flash_beats_warning(self):
-        bar = _detached_bar(hovered=True,
-                            flash_until=time.monotonic() + 1, flash_minutes=10)
-        text, _ = bar._center_text(self.WARN)
-        self.assertEqual(text, "+10 min")
-
-    def test_rapid_clicks_show_running_total(self):
-        bar = _detached_bar(flash_until=time.monotonic() + 1, flash_minutes=30)
-        text, _ = bar._center_text(self.CALM)
-        self.assertEqual(text, "+30 min")
-
-    def test_expired_flash_falls_through(self):
-        bar = _detached_bar(flash_until=time.monotonic() - 1, flash_minutes=10)
-        self.assertEqual(bar._center_text(self.CALM), (None, None))
 
 
 class TestIsCritical(unittest.TestCase):

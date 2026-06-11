@@ -3,7 +3,6 @@
 
 Commands:
   status                   print remaining time and today's work history
-  extend [N]               add N minutes (default: 10) and cancel any shutdown grace
   brightness off [N] [P]   stop dimming for N minutes (default: 120), park displays at P% (default: 100)
   brightness on            resume automatic dimming
   restart                  restart both systemd user services
@@ -31,13 +30,6 @@ def cmd_status():
         print(f"brightness control off for another {status.format_time(pause_left)}")
 
 
-def cmd_extend(minutes=10.0):
-    minutes = float(minutes)
-    status.write_command({"type": "extend", "seconds": minutes * 60})
-    label = f"{minutes:.0f}" if minutes == int(minutes) else f"{minutes:.1f}"
-    print(f"extend: +{label} min queued")
-
-
 def cmd_brightness_off(minutes=120.0, percent=100):
     brightness_control.pause(minutes * 60, percent)
     print(f"brightness control off for {minutes:g} min, displays at {percent}%")
@@ -60,8 +52,6 @@ def cmd_restart():
 argv = sys.argv[1:]
 if not argv or argv[0] == "status":
     cmd_status()
-elif argv[0] == "extend":
-    cmd_extend(float(argv[1]) if len(argv) > 1 else 10.0)
 elif argv[0] == "brightness" and len(argv) > 1 and argv[1] == "off":
     cmd_brightness_off(
         float(argv[2]) if len(argv) > 2 else 120.0,
