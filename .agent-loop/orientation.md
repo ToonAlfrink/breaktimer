@@ -78,7 +78,10 @@ Systemd services manage the processes: `breaktimer-core.service` and
 ## Quality gaps
 
 - Hover-expansion is wired but was verified by code path, not by a real pointer.
-- The full post-limit shutdown (refill gone → bar drains → uncancellable grace →
-  poweroff) is pinned by tests but has not yet happened on the real machine.
+- The post-limit shutdown path (refill gone → bar drains → uncancellable grace →
+  poweroff → re-shuts on every login until midnight) is fully pinned by tests
+  (`TestRestartAfterShutdown`, `TestExecuteShutdown`, `TestRefillFatigue.test_grace_not_cancellable_past_limit`)
+  but has not yet fired on the real machine. The owner's escape while in the 60s grace
+  window is `systemctl --user stop breaktimer-core.service`.
 - `pomodoro_state.json` and `state.sync-conflict-*.json` on disk are stale Syncthing
   artifacts — gitignored, owner's data, leave them.
