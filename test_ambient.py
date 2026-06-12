@@ -42,12 +42,13 @@ class TestWarningText(unittest.TestCase):
         self.assertIn("SHUTTING DOWN", text)
 
 
-def _detached_bar(hovered=False):
+def _detached_bar(hovered=False, brightness_pause_until=0.0):
     """A minimal stand-in wired to the real AmbientBar methods, no GTK needed."""
     class FakeBar:
         pass
     bar = FakeBar()
     bar.hovered = hovered
+    bar.brightness_pause_until = brightness_pause_until
     bar._center_text = AmbientBar._center_text.__get__(bar, FakeBar)
     bar._warning_text = AmbientBar._warning_text
     return bar
@@ -104,6 +105,49 @@ class TestDayFatigueDisplay(unittest.TestCase):
 
     def test_history_white_when_core_predates_fatigue(self):
         self.assertEqual(AmbientBar._history_rgb({}), (255, 255, 255))
+
+
+class TestBrightnessPauseDisplay(unittest.TestCase):
+    CALM = {"remaining_seconds": 50 * 60, "grace_remaining": None}
+
+    def test_pause_indicator_shows_when_paused(self):
+        bar = _detached_bar(brightness_pause_until=time.time() + 3600)
+        text, rgb = bar._center_text(self.CALM)
+        self.assertIn("☀", text)
+        self.assertIn("brightness paused", text)
+
+    def test_pause_indicator_includes_time_remaining(self):
+        bar = _detached_bar(brightness_pause_until=time.time() + 3600)
+        text, _ = bar._center_text(self.CALM)
+        self.assertRegex(text, r"\d+:\d+")
+
+    def test_no_indicator_when_not_paused(self):
+        bar = _detached_bar(brightness_pause_until=time.time() - 1)
+        self.assertEqual(bar._center_text(self.CALM), (None, None))
+
+    def test_no_indicator_when_never_paused(self):
+        bar = _detached_bar(brightness_pause_until=0.0)
+        self.assertEqual(bar._center_text(self.CALM), (None, None))
+
+    def test_warning_takes_priority_over_pause(self):
+        warn = {"remaining_seconds": 90, "grace_remaining": None}
+        bar = _detached_bar(brightness_pause_until=time.time() + 3600)
+        text, _ = bar._center_text(warn)
+        self.assertIn("save your work", text)
+        self.assertNotIn("brightness paused", text)
+
+    def test_day_limit_takes_priority_over_pause(self):
+        limit = {"remaining_seconds": 50 * 60, "grace_remaining": None, "refill_rate": 0.0}
+        bar = _detached_bar(brightness_pause_until=time.time() + 3600)
+        text, _ = bar._center_text(limit)
+        self.assertIn("day limit reached", text)
+        self.assertNotIn("brightness paused", text)
+
+    def test_pause_color_is_calm_blue(self):
+        bar = _detached_bar(brightness_pause_until=time.time() + 3600)
+        _, rgb = bar._center_text(self.CALM)
+        r, g, b = rgb
+        self.assertGreater(b, r)
 
 
 class TestIsCritical(unittest.TestCase):

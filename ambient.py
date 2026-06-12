@@ -17,6 +17,7 @@ gi.require_version("GtkLayerShell", "0.1")
 gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gtk, Gdk, GLib, GtkLayerShell, Pango, PangoCairo
 
+import brightness_control
 import status
 from status import format_time
 
@@ -53,6 +54,7 @@ class AmbientBar(Gtk.Window):
         self.snapshot = None
         self.hovered = False
         self._pulse = False
+        self.brightness_pause_until = 0.0
 
         GtkLayerShell.init_for_window(self)
         GtkLayerShell.set_namespace(self, "breaktimer")
@@ -96,6 +98,7 @@ class AmbientBar(Gtk.Window):
 
     def refresh(self):
         self.snapshot = status.read_status()
+        self.brightness_pause_until = brightness_control.pause_until()
         self.set_size_request(-1, self.target_height())
         self.area.queue_draw()
         return True  # keep the GLib timer alive
@@ -180,6 +183,9 @@ class AmbientBar(Gtk.Window):
             return warning, (255, 80, 80)
         if s.get("refill_rate", 1.0) <= 0:
             return "day limit reached — no refill", (255, 190, 80)
+        pause_left = self.brightness_pause_until - time.time()
+        if pause_left > 0:
+            return f"☀ brightness paused  {format_time(pause_left)}", (120, 200, 255)
         return None, None
 
     @staticmethod
