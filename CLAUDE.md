@@ -1,4 +1,4 @@
-# breaktimer — orientation for agents
+# breaktimer
 
 A Python app that enforces work-session limits by tracking keyboard/mouse activity
 via `libinput`, adjusting screen brightness and mouse sensitivity as time depletes, and
