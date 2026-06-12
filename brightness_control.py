@@ -1,9 +1,26 @@
+import datetime
+import math
 import os
 import subprocess
 import glob
 import time
 
 import status
+
+# Circadian curve: cosine bell peaking at 13:00 (1 pm), troughing at 01:00 (1 am).
+# The floor keeps screens usable at night even with a full bar.
+_CIRCADIAN_PEAK_HOUR = 13
+_CIRCADIAN_FLOOR = 0.15
+
+
+def circadian_fraction(hour: float) -> float:
+    """Return a [FLOOR, 1.0] multiplier for the time of day.
+
+    Peaks at 13:00 (fully bright), troughs at 01:00 (floor).
+    `hour` is a float in [0, 24).
+    """
+    angle = math.pi * (hour - _CIRCADIAN_PEAK_HOUR) / 12
+    return _CIRCADIAN_FLOOR + (1 - _CIRCADIAN_FLOOR) * (1 + math.cos(angle)) / 2
 
 _external_displays_cache = None
 
@@ -100,11 +117,16 @@ def _apply_to_all_displays(percentage):
 
 
 def set_brightness_by_fraction(fraction):
-    """Set all displays' brightness to the remaining-time fraction (0.0 to 1.0).
+    """Set all displays' brightness, composing depletion and time-of-day.
 
-    No-op while paused (see pause()/unpause()) so manual control stays in effect.
+    Final brightness = depletion_fraction × circadian_fraction, so a full bar
+    at 1 am still dims the screen to the circadian floor rather than blasting
+    cold-bright light. No-op while paused (see pause()/unpause()).
     """
     if is_paused():
         return
-    percentage = max(0, min(100, int(fraction * 100)))
+    now = datetime.datetime.now()
+    hour = now.hour + now.minute / 60
+    combined = fraction * circadian_fraction(hour)
+    percentage = max(0, min(100, int(combined * 100)))
     _apply_to_all_displays(percentage)

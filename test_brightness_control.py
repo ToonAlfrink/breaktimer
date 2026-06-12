@@ -1,12 +1,12 @@
-"""Tests for the brightness-pause switch.
+"""Tests for brightness control: pause switch and circadian curve.
 
-The pause exists so the user can reclaim manual control of their screens
-for a while (a call, a movie). A regression here either keeps dimming a
-screen the user asked us to leave alone, or never resumes — so both sides
-of the contract are pinned.
+The pause lets the user reclaim manual screen control (a call, a movie).
+The circadian curve multiplies the depletion fraction so a full bar late at
+night still dims the screen rather than blasting cold-bright light.
 
 Run: python3 -m unittest -q
 """
+import math
 import os
 import tempfile
 import time
@@ -17,8 +17,16 @@ import brightness_control
 import status
 
 
+def _noon_mock():
+    """Return a mock datetime.datetime.now() anchored at 13:00 (circadian peak)."""
+    dt = mock.Mock()
+    dt.hour = 13
+    dt.minute = 0
+    return dt
+
+
 class BrightnessPauseTest(unittest.TestCase):
-    """Runs against a fresh XDG_RUNTIME_DIR with display writes mocked out."""
+    """Runs against a fresh XDG_RUNTIME_DIR with display writes and clock mocked out."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -26,8 +34,13 @@ class BrightnessPauseTest(unittest.TestCase):
         self._env.start()
         self._apply = mock.patch.object(brightness_control, "_apply_to_all_displays")
         self.apply_mock = self._apply.start()
+        # Pin time to noon so circadian_fraction == 1.0 and depletion passes through.
+        self._dt = mock.patch("brightness_control.datetime")
+        dt_mock = self._dt.start()
+        dt_mock.datetime.now.return_value = _noon_mock()
 
     def tearDown(self):
+        self._dt.stop()
         self._apply.stop()
         self._env.stop()
         self._tmp.cleanup()
@@ -67,6 +80,44 @@ class BrightnessPauseTest(unittest.TestCase):
         with open(status.brightness_pause_path(), "w") as f:
             f.write("garbage")
         self.assertFalse(brightness_control.is_paused())
+
+
+class CircadianFractionTest(unittest.TestCase):
+    """Pin the shape of the circadian curve."""
+
+    def test_peak_at_1pm(self):
+        self.assertAlmostEqual(brightness_control.circadian_fraction(13), 1.0)
+
+    def test_trough_at_1am(self):
+        self.assertAlmostEqual(brightness_control.circadian_fraction(1), brightness_control._CIRCADIAN_FLOOR)
+
+    def test_floor_is_positive(self):
+        self.assertGreater(brightness_control._CIRCADIAN_FLOOR, 0)
+
+    def test_symmetry_around_peak(self):
+        # Equal distance before and after the peak → equal brightness.
+        self.assertAlmostEqual(
+            brightness_control.circadian_fraction(10),
+            brightness_control.circadian_fraction(16),
+        )
+
+    def test_midday_brighter_than_midnight(self):
+        self.assertGreater(
+            brightness_control.circadian_fraction(12),
+            brightness_control.circadian_fraction(0),
+        )
+
+    def test_always_in_range(self):
+        for h in range(24):
+            v = brightness_control.circadian_fraction(h)
+            self.assertGreaterEqual(v, brightness_control._CIRCADIAN_FLOOR - 1e-9)
+            self.assertLessEqual(v, 1.0 + 1e-9)
+
+    def test_full_bar_at_night_is_dimmed(self):
+        # A full bar at 1 am must land below noon brightness at the same bar level.
+        night = brightness_control.circadian_fraction(1) * 1.0
+        noon = brightness_control.circadian_fraction(13) * 1.0
+        self.assertLess(night, noon)
 
 
 if __name__ == "__main__":
