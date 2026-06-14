@@ -263,29 +263,33 @@ class TestInitializeState(InTempDir):
 class TestExecuteShutdown(unittest.TestCase):
     """execute_shutdown uses absolute paths, no sudo, and falls through on failure."""
 
-    def test_first_command_is_systemctl_absolute(self):
+    def test_first_command_is_busctl_dbus(self):
         with mock.patch("subprocess.run") as run:
             main.execute_shutdown()
-        self.assertEqual(run.call_args_list[0].args[0], ['/usr/bin/systemctl', 'poweroff'])
+        first = run.call_args_list[0].args[0]
+        self.assertEqual(first[0], '/usr/bin/busctl')
+        self.assertIn('PowerOff', first)
 
     def test_no_sudo_in_any_command(self):
+        import io
         calls = []
         def side_effect(cmd, **kw):
             calls.append(cmd)
             raise subprocess.CalledProcessError(1, cmd)
-        with mock.patch("subprocess.run", side_effect=side_effect):
+        with mock.patch("subprocess.run", side_effect=side_effect), \
+             mock.patch("sys.stderr", io.StringIO()):
             main.execute_shutdown()
         self.assertFalse(any("sudo" in c[0] for c in calls), "sudo must not appear in any shutdown command")
 
-    def test_falls_through_to_shutdown_on_failure(self):
+    def test_falls_through_busctl_to_systemctl_to_shutdown(self):
         calls = []
         def side_effect(cmd, **kw):
             calls.append(cmd[0])
-            if 'systemctl' not in cmd[0]:
+            if 'busctl' not in cmd[0]:
                 raise subprocess.CalledProcessError(1, cmd)
         with mock.patch("subprocess.run", side_effect=side_effect):
             main.execute_shutdown()
-        self.assertEqual(calls, ['/usr/bin/systemctl'])
+        self.assertEqual(calls, ['/usr/bin/busctl'])
 
     def test_all_fail_logs_error_to_stderr(self):
         import io

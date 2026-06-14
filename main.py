@@ -177,9 +177,13 @@ def compute_offline_duration_seconds(state):
     return max(0.0, time.time() - state.last_saved_time)
 
 def execute_shutdown():
-    # Use absolute paths to avoid PATH hijacking; skip sudo — systemctl poweroff
-    # goes through logind/polkit and doesn't need a SUID binary.
+    # Call the logind D-Bus API directly (busctl) — most reliable from a user
+    # service since it bypasses systemctl's interactive-session checks while
+    # still going through polkit.  Fall through to classic tools on failure.
     shutdown_commands = [
+        ['/usr/bin/busctl', 'call',
+         'org.freedesktop.login1', '/org/freedesktop/login1',
+         'org.freedesktop.login1.Manager', 'PowerOff', 'b', 'false'],
         ['/usr/bin/systemctl', 'poweroff'],
         ['/sbin/shutdown', '-h', 'now'],
     ]
