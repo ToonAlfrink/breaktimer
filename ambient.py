@@ -11,6 +11,7 @@ import os
 import sys
 import time
 
+import cairo
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkLayerShell", "0.1")
@@ -46,6 +47,19 @@ EXPAND_SECONDS = 10 * 60   # bar expands and shows time at this threshold
 WARN_SECONDS = 5 * 60      # warning text ("wrap up", "save") appears below this
 PULSE_MS = 500             # grace-mode background pulse interval
 FONT = Pango.FontDescription("monospace 10")
+
+
+def _mix(rgb, target, t):
+    """Blend an (r, g, b) triplet toward a target colour by fraction t."""
+    return tuple(c + (tc - c) * t for c, tc in zip(rgb, target))
+
+
+def _lighten(rgb, t):
+    return _mix(rgb, (255, 255, 255), t)
+
+
+def _darken(rgb, t):
+    return _mix(rgb, (0, 0, 0), t)
 
 
 class AmbientBar(Gtk.Window):
@@ -126,31 +140,73 @@ class AmbientBar(Gtk.Window):
 
         in_grace = self.snapshot and self.snapshot.get("grace_remaining") is not None
         if in_grace and self._pulse:
-            cr.set_source_rgba(0.40, 0.03, 0.03, 0.96)
+            cr.set_source_rgba(0.42, 0.03, 0.03, 0.96)
         else:
-            cr.set_source_rgba(0.06, 0.06, 0.06, 0.92)
+            cr.set_source_rgba(0.05, 0.05, 0.06, 0.88)
         cr.paint()
 
         s = self.snapshot
         if not s:
-            cr.set_source_rgba(0.4, 0.4, 0.4, 0.9)
+            # core silent: a flat desaturated rail — no colour, no claim about time
+            cr.set_source_rgba(0.42, 0.42, 0.45, 0.55)
             cr.rectangle(0, 0, w, h)
             cr.fill()
             if h >= EXPANDED_HEIGHT:
                 self._text(cr, w / 2, h, "breaktimer core not running",
-                           align="center", rgb=(255, 255, 255))
+                           align="center", rgb=(210, 210, 210))
             return
 
         fraction = (s["remaining_seconds"] / s["max_seconds"]
                     if s["max_seconds"] else 0.0)
-        r, g, b = status.color_for_fraction(fraction)
-        alpha = 1.0 if s["is_active"] else 0.45  # dimmed while replenishing
-        cr.set_source_rgba(r / 255, g / 255, b / 255, alpha)
-        cr.rectangle(0, 0, w * fraction, h)
-        cr.fill()
+        self._fill_bar(cr, w, h, fraction,
+                       status.color_for_fraction(fraction), s["is_active"])
 
         if h >= EXPANDED_HEIGHT:
             self._draw_detail(cr, w, h, s, fraction)
+
+    @staticmethod
+    def _fill_bar(cr, w, h, fraction, rgb, active):
+        """Draw the mana bar: a dim full-width ghost rail of the current hue,
+        the lit portion over it with a top-lit vertical gradient and catch-light,
+        and a soft glow at the leading edge. Idle (replenishing) reads as dimmed."""
+        r, g, b = (c / 255 for c in rgb)
+
+        # ghost of the spent remainder — keeps the strip one continuous rail
+        # instead of a bright stub trailing into a black slab
+        cr.set_source_rgba(r, g, b, 0.14 if active else 0.08)
+        cr.rectangle(0, 0, w, h)
+        cr.fill()
+
+        fill_w = w * fraction
+        if fill_w <= 0:
+            return
+        alpha = 1.0 if active else 0.5  # dimmed while replenishing
+
+        top = _lighten(rgb, 0.45)
+        bot = _darken(rgb, 0.18)
+        grad = cairo.LinearGradient(0, 0, 0, h)
+        grad.add_color_stop_rgba(0.0, *(c / 255 for c in top), alpha)
+        grad.add_color_stop_rgba(0.4, r, g, b, alpha)
+        grad.add_color_stop_rgba(1.0, *(c / 255 for c in bot), alpha)
+        cr.set_source(grad)
+        cr.rectangle(0, 0, fill_w, h)
+        cr.fill()
+
+        # catch-light along the very top edge
+        cr.set_source_rgba(1, 1, 1, 0.30 * alpha)
+        cr.rectangle(0, 0, fill_w, 1)
+        cr.fill()
+
+        # soft bright glow at the leading edge — reads as charged, not cut off
+        if fraction < 1.0:
+            glow_w = min(8.0, fill_w)
+            x0 = fill_w - glow_w
+            glow = cairo.LinearGradient(x0, 0, fill_w, 0)
+            glow.add_color_stop_rgba(0.0, *(c / 255 for c in top), 0.0)
+            glow.add_color_stop_rgba(1.0, 1, 1, 1, 0.55 * alpha)
+            cr.set_source(glow)
+            cr.rectangle(x0, 0, glow_w, h)
+            cr.fill()
 
     def _draw_detail(self, cr, w, h, s, fraction):
         icon = "●" if s["is_active"] else "○"

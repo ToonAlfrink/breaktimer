@@ -184,6 +184,32 @@ class TestIsCritical(unittest.TestCase):
         self.assertTrue(bar.is_critical())
 
 
+class TestFillBar(unittest.TestCase):
+    """Smoke-test the bar rendering on an offscreen surface (no GTK/Wayland)."""
+
+    def _render(self, fraction, active=True, w=200, h=6):
+        import cairo
+        import status
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(1, w), h)
+        cr = cairo.Context(surf)
+        AmbientBar._fill_bar(cr, w, h, fraction,
+                             status.color_for_fraction(fraction), active)
+        surf.flush()
+        return surf
+
+    def test_renders_across_fill_levels_without_error(self):
+        for f in (1.0, 0.5, 0.1, 0.0):
+            for active in (True, False):
+                self._render(f, active)  # must not raise
+
+    def test_empty_bar_paints_only_the_ghost_rail(self):
+        # fraction 0 still draws the dim full-width rail, never the lit gradient
+        self._render(0.0)  # must not raise on zero-width fill
+
+    def test_narrow_strip_does_not_overflow(self):
+        self._render(0.5, w=4, h=6)  # leading glow must clamp to fill width
+
+
 class TestBarManager(unittest.TestCase):
     def _setup(self):
         created = []
