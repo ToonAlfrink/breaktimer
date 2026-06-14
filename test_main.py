@@ -32,7 +32,7 @@ class StubMonitor:
     """Stands in for ActivityMonitor without spawning libinput."""
 
     def __init__(self, healthy=True):
-        self._t = time.time()
+        self._t = time.monotonic()
         self._healthy = healthy
 
     def get_last_activity_time(self):
@@ -143,7 +143,7 @@ class TestShutdownGrace(InTempDir):
 
     def test_shutdown_fires_after_grace_elapses_and_saves_state(self):
         loop = make_loop(0)
-        loop.grace_start = time.time() - TimerLoop.GRACE_SECONDS - 1
+        loop.grace_start = time.monotonic() - TimerLoop.GRACE_SECONDS - 1
         with mock.patch.object(main, "execute_shutdown") as shutdown:
             self.assertTrue(loop._check_shutdown())
         shutdown.assert_called_once()
@@ -151,7 +151,7 @@ class TestShutdownGrace(InTempDir):
 
     def test_refill_cancels_grace_window(self):
         loop = make_loop(120)
-        loop.grace_start = time.time()
+        loop.grace_start = time.monotonic()
         with mock.patch.object(main, "execute_shutdown") as shutdown:
             self.assertFalse(loop._check_shutdown())
         shutdown.assert_not_called()
@@ -196,6 +196,38 @@ class TestActivityStatus(unittest.TestCase):
         loop.activity_monitor.set_last_activity_time(now - 300)  # would be idle if healthy
         loop._update_activity_status(now, 1)
         self.assertTrue(loop.state.is_active)
+
+
+class TestClockResilience(InTempDir):
+    """A clock that lurches forward (NTP step, resume-from-suspend) must not let a
+    single tick drain the bar and trip the uncancellable shutdown grace."""
+
+    def _run_one_tick(self, loop, jumped):
+        with mock.patch("main.time.monotonic", return_value=jumped), \
+             mock.patch("main.time.sleep", side_effect=StopIteration), \
+             mock.patch.object(main, "execute_shutdown") as shutdown, \
+             mock.patch.object(main, "set_brightness_by_fraction"), \
+             mock.patch.object(main, "set_sensitivity_by_fraction"), \
+             mock.patch.object(main, "_notify"), \
+             mock.patch.object(status, "write_status"):
+            with self.assertRaises(StopIteration):
+                loop.run()
+        return shutdown
+
+    def test_giant_tick_meters_at_most_max_and_does_not_shut_down(self):
+        # Worst case: monitor is down (so the tick is forced active and drains).
+        loop = make_loop(3600)
+        loop.activity_monitor = StubMonitor(healthy=False)
+        shutdown = self._run_one_tick(loop, loop.last_loop_time + 4 * 3600)
+        self.assertGreaterEqual(loop.state.remaining_time, 3600 - loop.MAX_TICK_SECONDS)
+        shutdown.assert_not_called()
+
+    def test_giant_tick_with_healthy_monitor_reads_as_idle(self):
+        # A large gap is downtime, not work — it must never drain the bar.
+        loop = make_loop(1800)
+        shutdown = self._run_one_tick(loop, loop.last_loop_time + 4 * 3600)
+        self.assertGreaterEqual(loop.state.remaining_time, 1800)
+        shutdown.assert_not_called()
 
 
 class TestMonitorHealthNotification(unittest.TestCase):
@@ -332,12 +364,12 @@ class TestGraceRemaining(unittest.TestCase):
 
     def test_returns_countdown_during_grace(self):
         loop = make_loop(0)
-        loop.grace_start = time.time() - 10
+        loop.grace_start = time.monotonic() - 10
         self.assertAlmostEqual(loop._grace_remaining(), TimerLoop.GRACE_SECONDS - 10, delta=1)
 
     def test_clamps_at_zero_when_elapsed(self):
         loop = make_loop(0)
-        loop.grace_start = time.time() - TimerLoop.GRACE_SECONDS - 10
+        loop.grace_start = time.monotonic() - TimerLoop.GRACE_SECONDS - 10
         self.assertEqual(loop._grace_remaining(), 0.0)
 
 
@@ -399,7 +431,7 @@ class TestNotifications(unittest.TestCase):
 
     def test_grace_notification_fires_on_grace_start(self):
         loop = make_loop(0)
-        loop.grace_start = time.time() - 5
+        loop.grace_start = time.monotonic() - 5
         with mock.patch.object(main, "_notify") as notif:
             loop._check_notifications()
         # remaining=0 is below all thresholds, so multiple notifications fire;
@@ -411,7 +443,7 @@ class TestNotifications(unittest.TestCase):
 
     def test_grace_notification_clears_when_grace_ends(self):
         loop = make_loop(0)
-        loop.grace_start = time.time() - 5
+        loop.grace_start = time.monotonic() - 5
         with mock.patch.object(main, "_notify"):
             loop._check_notifications()
         self.assertIn("grace", loop._notified)
@@ -451,7 +483,7 @@ class TestNotifications(unittest.TestCase):
 
     def test_grace_notification_refires_after_grace_cancelled_and_new_grace_starts(self):
         loop = make_loop(0)
-        loop.grace_start = time.time() - 5
+        loop.grace_start = time.monotonic() - 5
         with mock.patch.object(main, "_notify"):
             loop._check_notifications()
         self.assertIn("grace", loop._notified)
@@ -465,7 +497,7 @@ class TestNotifications(unittest.TestCase):
 
         # timer depletes to 0 again and a new grace window opens
         loop.state.remaining_time = 0
-        loop.grace_start = time.time() - 2
+        loop.grace_start = time.monotonic() - 2
         with mock.patch.object(main, "_notify") as notif:
             loop._check_notifications()
         grace_calls = [c[0][0] for c in notif.call_args_list if "Shutting down" in c[0][0]]
@@ -493,7 +525,7 @@ class TestLiveStatus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp}):
             loop = make_loop(900)
-            loop.grace_start = time.time() - 10
+            loop.grace_start = time.monotonic() - 10
             loop._write_status()
             snap = status_mod.read_status()
         self.assertEqual(snap["remaining_seconds"], 900)
@@ -590,7 +622,7 @@ class TestRefillFatigue(unittest.TestCase):
         with mock.patch.object(main, "execute_shutdown") as shutdown:
             self.assertFalse(loop._check_shutdown())
             self.assertIsNotNone(loop.grace_start)
-            loop.grace_start = time.time() - TimerLoop.GRACE_SECONDS - 1
+            loop.grace_start = time.monotonic() - TimerLoop.GRACE_SECONDS - 1
             with mock.patch.object(main, "save_state_to_file"):
                 self.assertTrue(loop._check_shutdown())
         shutdown.assert_called_once()
@@ -633,7 +665,7 @@ class TestDailyNotifications(unittest.TestCase):
 
     def test_grace_message_honest_when_no_refill_left(self):
         loop = make_loop(0, today_total=10 * 3600)
-        loop.grace_start = time.time()
+        loop.grace_start = time.monotonic()
         with mock.patch.object(main, "_notify") as notif:
             loop._check_notifications()
         grace_calls = [c for c in notif.call_args_list if "Shutting down" in c.args[0]
@@ -644,7 +676,7 @@ class TestDailyNotifications(unittest.TestCase):
 
     def test_grace_message_offers_idle_escape_below_limit(self):
         loop = make_loop(0, today_total=3600)
-        loop.grace_start = time.time()
+        loop.grace_start = time.monotonic()
         with mock.patch.object(main, "_notify") as notif:
             loop._check_notifications()
         self.assertIn("go idle to cancel", notif.call_args.args[0])

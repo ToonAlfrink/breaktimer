@@ -75,7 +75,7 @@ class TimerState:
 
 class ActivityMonitor:
     def __init__(self):
-        self.last_activity_time = time.time()
+        self.last_activity_time = time.monotonic()
         self.is_running = False
         self.libinput_process = None
         self.monitor_thread = None
@@ -126,7 +126,7 @@ class ActivityMonitor:
                         break
                     if line.strip():
                         with self.lock:
-                            self.last_activity_time = time.time()
+                            self.last_activity_time = time.monotonic()
 
                 self.libinput_process.wait()
 
@@ -205,6 +205,12 @@ class TimerLoop:
     ACTIVITY_THRESHOLD_SECONDS = SECONDS_PER_MINUTE
     ADJUSTMENT_INTERVAL_SECONDS = 10
     GRACE_SECONDS = 60
+    # A single tick must never meter more than this much time. The loop ticks at
+    # 1 Hz; anything larger is a scheduler stall, not real work. Without this a
+    # one-off long tick could drain the whole bar at once and trip the shutdown
+    # grace. (Monotonic time already shields us from NTP steps and suspend; this
+    # is the backstop for everything else, and it always errs toward the user.)
+    MAX_TICK_SECONDS = SECONDS_PER_MINUTE
 
     def __init__(self, state, offline_duration_seconds, activity_monitor, mana_max_seconds,
                  mana_replenish_seconds, daily_budget_seconds, daily_limit_seconds):
@@ -214,9 +220,10 @@ class TimerLoop:
         self.mana_replenish_seconds = mana_replenish_seconds
         self.daily_budget_seconds = daily_budget_seconds
         self.daily_limit_seconds = daily_limit_seconds
-        self.last_loop_time = time.time() - offline_duration_seconds
-        self.last_save_time = time.time()
-        self.last_adjustment_time = time.time()
+        # All in-process timing is monotonic so NTP steps / suspend can't warp it.
+        self.last_loop_time = time.monotonic() - offline_duration_seconds
+        self.last_save_time = time.monotonic()
+        self.last_adjustment_time = time.monotonic()
         self.grace_start = None
         self._status_write_warned = False
         # Pre-populate with thresholds already crossed so a restart below a level
@@ -282,7 +289,7 @@ class TimerLoop:
     def _check_shutdown(self):
         if self.state.remaining_time <= 0:
             self.state.remaining_time = 0.0
-            now = time.time()
+            now = time.monotonic()
             if self.grace_start is None:
                 self.grace_start = now
             if now - self.grace_start >= self.GRACE_SECONDS:
@@ -304,7 +311,7 @@ class TimerLoop:
         """Seconds left in the shutdown grace window, or None if not in it."""
         if self.grace_start is None:
             return None
-        return max(0.0, self.GRACE_SECONDS - (time.time() - self.grace_start))
+        return max(0.0, self.GRACE_SECONDS - (time.monotonic() - self.grace_start))
 
     def _check_notifications(self):
         remaining = self.state.remaining_time
@@ -364,12 +371,15 @@ class TimerLoop:
 
     def run(self):
         while True:
-            current_loop_time = time.time()
+            current_loop_time = time.monotonic()
             time_since_last_loop = current_loop_time - self.last_loop_time
 
             self._update_activity_status(current_loop_time, time_since_last_loop)
             self._check_monitor_health()
-            self._adjust_timer(time_since_last_loop)
+            # Meter at most one bounded step, even if the raw gap was longer (the
+            # raw gap above still drives activity detection, so a long gap reads
+            # as idle rather than draining).
+            self._adjust_timer(min(time_since_last_loop, self.MAX_TICK_SECONDS))
             if self._check_shutdown():
                 sys.exit(0)
             
@@ -451,8 +461,10 @@ def main():
 
     save_original_sensitivity()
 
+    # Offline duration is wall-clock (it spans a process/boot gap); fold it into
+    # the monotonic activity baseline so the first tick reads as idle downtime.
     offline_duration_seconds = compute_offline_duration_seconds(state)
-    activity_monitor.set_last_activity_time(time.time() - offline_duration_seconds)
+    activity_monitor.set_last_activity_time(time.monotonic() - offline_duration_seconds)
 
     try:
         timer_loop = TimerLoop(
