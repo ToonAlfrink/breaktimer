@@ -18,14 +18,14 @@ import status
 
 
 def cmd_status():
-    s = status.read_status(max_age_seconds=10)
+    s = status.Snapshot.read(max_age_seconds=10)
     if not s:
         print("breaktimer: core not running")
         return
-    active = "●" if s["is_active"] else "○"
-    remaining = status.format_time(s["remaining_seconds"])
-    print(f"{remaining} {active}  {s.get('history', '')}")
-    rate = s.get("refill_rate", 1.0)
+    active = "●" if s.is_active else "○"
+    remaining = status.format_time(s.remaining_seconds)
+    print(f"{remaining} {active}  {s.history}")
+    rate = s.refill_rate
     if rate <= 0:
         print("day limit reached — no refill left today")
     elif rate < 1:

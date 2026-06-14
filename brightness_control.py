@@ -23,34 +23,53 @@ def circadian_fraction(hour: float) -> float:
     angle = math.pi * (hour - _CIRCADIAN_PEAK_HOUR) / 12
     return _CIRCADIAN_FLOOR + (1 - _CIRCADIAN_FLOOR) * (1 + math.cos(angle)) / 2
 
-_external_displays_cache = None
-_detect_lock = threading.Lock()
+class _ExternalDisplays:
+    """The set of DDC/CI-capable monitors, detected once off-thread and cached.
+
+    ddcutil detect is slow (seconds), so detection runs in a background thread
+    while readers get [] until it completes. The cache and its lock are the
+    object's own fields — the cross-thread state is encapsulated behind detect()
+    and get(), not a bare module global mutated through `global`.
+    """
+
+    def __init__(self):
+        self._cache = None
+        self._lock = threading.Lock()
+
+    def detect(self):
+        """Kick off ddcutil detect in a background thread so callers never block."""
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        displays = []
+        try:
+            result = subprocess.run(['ddcutil', 'detect', '--brief'],
+                                    capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if line.strip().startswith('Display'):
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            try:
+                                displays.append(int(parts[1]))
+                            except ValueError:
+                                pass
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        with self._lock:
+            self._cache = displays
+
+    def get(self):
+        """Cached display numbers ([] until detection completes)."""
+        with self._lock:
+            return [] if self._cache is None else list(self._cache)
 
 
-def _run_detection():
-    global _external_displays_cache
-    displays = []
-    try:
-        result = subprocess.run(['ddcutil', 'detect', '--brief'],
-                                capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            for line in result.stdout.split('\n'):
-                if line.strip().startswith('Display'):
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        try:
-                            displays.append(int(parts[1]))
-                        except ValueError:
-                            pass
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    with _detect_lock:
-        _external_displays_cache = displays
+_external_displays = _ExternalDisplays()
 
 
 def start_external_display_detection():
-    """Kick off ddcutil detect in a background thread so the timer loop never blocks."""
-    threading.Thread(target=_run_detection, daemon=True).start()
+    _external_displays.detect()
 
 
 def set_brightness(level):
@@ -76,8 +95,7 @@ def set_brightness(level):
 
 def get_external_displays():
     """Return cached list of DDC/CI-capable displays ([] if detection not yet complete)."""
-    with _detect_lock:
-        return [] if _external_displays_cache is None else list(_external_displays_cache)
+    return _external_displays.get()
 
 def set_external_brightness(display_num, level):
     """Set brightness of an external monitor via ddcutil (0-100)."""

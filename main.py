@@ -11,7 +11,7 @@ from datetime import date, timedelta
 import status
 from status import SECONDS_PER_MINUTE, today_str
 from brightness_control import set_brightness_by_fraction, start_external_display_detection
-from mouse_sensitivity_control import set_sensitivity_by_fraction, save_original_sensitivity, restore_original_sensitivity
+from mouse_sensitivity_control import set_sensitivity_by_fraction, read_original_sensitivity, restore_sensitivity
 
 _HISTORY_DAYS = 400  # covers 12-month sparkline + buffer
 
@@ -403,18 +403,17 @@ class TimerLoop:
                 self._emit(msg, urgency=urgency)
 
     def _write_status(self):
-        """Publish the live snapshot for ambient surfaces (see status.py)."""
-        payload = {
-            "remaining_seconds": self.state.remaining_time,
-            "max_seconds": self.mana_max_seconds,
-            "is_active": self.state.is_active,
-            "grace_remaining": self._grace_remaining(),
-            "refill_rate": self._refill_multiplier(),
-            "monitor_down": not self.activity_monitor.is_healthy(),
-            "history": status.format_history_line(self.state.daily_work_totals),
-        }
+        """Publish the live snapshot for ambient surfaces (see status.Snapshot)."""
+        snapshot = status.Snapshot(
+            remaining_seconds=self.state.remaining_time,
+            max_seconds=self.mana_max_seconds,
+            is_active=self.state.is_active,
+            grace_remaining=self._grace_remaining(),
+            refill_rate=self._refill_multiplier(),
+            history=status.format_history_line(self.state.daily_work_totals),
+        )
         try:
-            status.write_status(payload)
+            snapshot.publish()
         except OSError as e:
             if not self._status_write_warned:
                 print(f"WARNING: cannot publish live status: {e}", file=sys.stderr)
@@ -521,7 +520,7 @@ def main():
 
     effects = EffectsWorker().start()
 
-    save_original_sensitivity()
+    original_sensitivity = read_original_sensitivity()
 
     # Offline duration is wall-clock (it spans a process/boot gap); fold it into
     # the monotonic activity baseline so the first tick reads as idle downtime.
@@ -545,7 +544,7 @@ def main():
         save_state_to_file(state)
     finally:
         activity_monitor.stop()
-        restore_original_sensitivity()
+        restore_sensitivity(original_sensitivity)
 
 if __name__ == "__main__":
     main() 

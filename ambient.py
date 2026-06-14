@@ -101,7 +101,7 @@ class AmbientBar(Gtk.Window):
 
     # -- state -----------------------------------------------------------
     def _pulse_tick(self):
-        in_grace = self.snapshot and self.snapshot.get("grace_remaining") is not None
+        in_grace = self.snapshot and self.snapshot.grace_remaining is not None
         if in_grace:
             self._pulse = not self._pulse
             self.area.queue_draw()
@@ -111,7 +111,7 @@ class AmbientBar(Gtk.Window):
         return True
 
     def refresh(self):
-        self.snapshot = status.read_status()
+        self.snapshot = status.Snapshot.read()
         self.brightness_pause_until = brightness_control.pause_until()
         self.set_size_request(-1, self.target_height())
         self.area.queue_draw()
@@ -126,9 +126,9 @@ class AmbientBar(Gtk.Window):
         s = self.snapshot
         if not s:
             return False
-        return (s.get("grace_remaining") is not None
-                or s["remaining_seconds"] < EXPAND_SECONDS
-                or s.get("refill_rate", 1.0) <= 0)  # past the daily limit: stay expanded
+        return (s.grace_remaining is not None
+                or s.remaining_seconds < EXPAND_SECONDS
+                or s.refill_rate <= 0)  # past the daily limit: stay expanded
 
     def target_height(self):
         return EXPANDED_HEIGHT if (self.hovered or self.is_critical()) else STRIP_HEIGHT
@@ -138,7 +138,7 @@ class AmbientBar(Gtk.Window):
         w = area.get_allocated_width()
         h = area.get_allocated_height()
 
-        in_grace = self.snapshot and self.snapshot.get("grace_remaining") is not None
+        in_grace = self.snapshot and self.snapshot.grace_remaining is not None
         if in_grace and self._pulse:
             cr.set_source_rgba(0.42, 0.03, 0.03, 0.96)
         else:
@@ -156,10 +156,10 @@ class AmbientBar(Gtk.Window):
                            align="center", rgb=(210, 210, 210))
             return
 
-        fraction = (s["remaining_seconds"] / s["max_seconds"]
-                    if s["max_seconds"] else 0.0)
+        fraction = (s.remaining_seconds / s.max_seconds
+                    if s.max_seconds else 0.0)
         self._fill_bar(cr, w, h, fraction,
-                       status.color_for_fraction(fraction), s["is_active"])
+                       status.color_for_fraction(fraction), s.is_active)
 
         if h >= EXPANDED_HEIGHT:
             self._draw_detail(cr, w, h, s, fraction)
@@ -209,11 +209,11 @@ class AmbientBar(Gtk.Window):
             cr.fill()
 
     def _draw_detail(self, cr, w, h, s, fraction):
-        icon = "●" if s["is_active"] else "○"
-        left = f" {format_time(s['remaining_seconds'])} {icon}"
+        icon = "●" if s.is_active else "○"
+        left = f" {format_time(s.remaining_seconds)} {icon}"
         self._text(cr, 0, h, left, align="left")
 
-        history = s.get("history")
+        history = s.history
         if history:
             self._text(cr, w - 8, h, history, align="right",
                        rgb=self._history_rgb(s))
@@ -226,7 +226,7 @@ class AmbientBar(Gtk.Window):
     def _history_rgb(s):
         """History text mirrors the day's fatigue: white in budget, amber past
         the budget, red once refill is gone."""
-        rate = s.get("refill_rate", 1.0)
+        rate = s.refill_rate
         if rate <= 0:
             return (255, 80, 80)
         if rate < 1:
@@ -237,7 +237,7 @@ class AmbientBar(Gtk.Window):
         warning = self._warning_text(s)
         if warning:
             return warning, (255, 80, 80)
-        if s.get("refill_rate", 1.0) <= 0:
+        if s.refill_rate <= 0:
             return "day limit reached — no refill", (255, 190, 80)
         pause_left = self.brightness_pause_until - time.time()
         if pause_left > 0:
@@ -246,12 +246,12 @@ class AmbientBar(Gtk.Window):
 
     @staticmethod
     def _warning_text(s):
-        grace = s.get("grace_remaining")
+        grace = s.grace_remaining
         if grace is not None:
-            if s.get("refill_rate", 1.0) <= 0:
+            if s.refill_rate <= 0:
                 return f"DAY LIMIT — SHUTTING DOWN IN {format_time(grace)}"
             return f"SHUTTING DOWN IN {format_time(grace)} — go idle to cancel"
-        remaining = s["remaining_seconds"]
+        remaining = s.remaining_seconds
         if remaining < 2 * 60:
             return "⚠ save your work now"
         if remaining < WARN_SECONDS:

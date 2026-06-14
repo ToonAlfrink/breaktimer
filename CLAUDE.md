@@ -40,9 +40,13 @@ Two independent processes bridged by a live status file:
   `gir1.2-gtklayershell-0.1`, `libgtk-layer-shell0`); reads the snapshot at 1 Hz,
   goes grey if the core stops publishing. One bar per monitor; responds to
   monitor-added/removed. Either process can restart without the other.
-- `status.py` — the bridge: snapshot read/write in `$XDG_RUNTIME_DIR/breaktimer-status.json`
-  (tmpfs — no disk churn, gone at logout), per-process singleton locks, and the
-  shared colour palette and time formatting.
+- `status.py` — the bridge. The `Snapshot` dataclass IS the cross-process contract:
+  the core builds one each tick and calls `.publish()`; surfaces call `Snapshot.read()`,
+  so neither side hard-codes payload keys. Transport is an atomic JSON write in
+  `$XDG_RUNTIME_DIR/breaktimer-status.json` (tmpfs — no disk churn, gone at logout);
+  `read()` defaults missing fields and drops unknown ones, so the two services can
+  restart on either side of a schema change. Also holds the per-process singleton
+  locks, shared colour palette, and time formatting.
 - `breaktimer` — CLI tool: `status`, `brightness off|on`, `restart`.
 - `brightness_control.py` — wraps `brightnessctl`/sysfs/ddcutil to set screen brightness.
 - `mouse_sensitivity_control.py` — rewrites COSMIC input config files to scale pointer speed.

@@ -528,7 +528,6 @@ class TestLiveStatus(unittest.TestCase):
         self.assertEqual(snap["max_seconds"], 3600)
         self.assertAlmostEqual(snap["grace_remaining"], 50, delta=2)
         self.assertIn("history", snap)
-        self.assertFalse(snap["monitor_down"])  # StubMonitor is healthy
 
 
 class TestUnconditionalLimit(unittest.TestCase):

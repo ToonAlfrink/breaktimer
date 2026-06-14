@@ -10,6 +10,7 @@ import json
 import os
 import time
 from collections import defaultdict
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 
 SECONDS_PER_MINUTE = 60
@@ -48,6 +49,40 @@ def read_status(max_age_seconds=5.0):
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+@dataclass
+class Snapshot:
+    """The contract between the timer core and every display surface.
+
+    The core builds one each tick and calls publish(); ambient.py and the CLI
+    call read(). This dataclass IS the schema — the single place field names,
+    types, and absence-semantics live, so neither side hard-codes string keys.
+
+    Every field carries a default that reads as "unknown / not active", which
+    serves two ends: a surface that catches a malformed or older snapshot
+    degrades gracefully instead of crashing, and read() tolerates a producer on
+    either side of a restart adding or dropping a field (the two services
+    restart independently). The core always sets all fields explicitly.
+    """
+    remaining_seconds: float = 0.0
+    max_seconds: float = 0.0
+    is_active: bool = False
+    grace_remaining: float | None = None   # seconds left in shutdown grace, or None
+    refill_rate: float = 1.0               # idle-refill fatigue multiplier (1.0 = none)
+    history: str = ""                      # one-line work-history summary
+
+    def publish(self):
+        write_status(asdict(self))
+
+    @classmethod
+    def read(cls, max_age_seconds=5.0):
+        """Latest snapshot, or None if missing, stale, corrupt, or malformed."""
+        data = read_status(max_age_seconds)
+        if not isinstance(data, dict):
+            return None
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 def brightness_pause_path():

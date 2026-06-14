@@ -9,35 +9,36 @@ from unittest import mock
 
 import ambient
 from ambient import AmbientBar, BarManager, EXPAND_SECONDS, WARN_SECONDS
+from status import Snapshot
 
 
 class TestWarningText(unittest.TestCase):
     def test_grace_mode_shows_countdown(self):
-        s = {"grace_remaining": 45.0, "remaining_seconds": 0}
+        s = Snapshot(grace_remaining=45.0, remaining_seconds=0)
         text = AmbientBar._warning_text(s)
         self.assertIn("SHUTTING DOWN", text)
         self.assertIn("0:45", text)
         self.assertIn("go idle", text)
 
     def test_under_2min_shows_save_warning(self):
-        s = {"remaining_seconds": 90, "grace_remaining": None}
+        s = Snapshot(remaining_seconds=90, grace_remaining=None)
         text = AmbientBar._warning_text(s)
         self.assertIn("save your work", text)
         self.assertNotIn("wrap up", text)
 
     def test_between_2_and_warn_shows_wrap_up(self):
-        s = {"remaining_seconds": 3 * 60, "grace_remaining": None}
+        s = Snapshot(remaining_seconds=3 * 60, grace_remaining=None)
         text = AmbientBar._warning_text(s)
         self.assertIn("wrap up soon", text)
         self.assertNotIn("save your work", text)
 
     def test_above_warn_threshold_returns_none(self):
-        s = {"remaining_seconds": WARN_SECONDS + 1, "grace_remaining": None}
+        s = Snapshot(remaining_seconds=WARN_SECONDS + 1, grace_remaining=None)
         self.assertIsNone(AmbientBar._warning_text(s))
 
     def test_grace_takes_priority_over_remaining(self):
         # even with remaining_seconds > 0, grace_remaining drives the message
-        s = {"remaining_seconds": 500, "grace_remaining": 30.0}
+        s = Snapshot(remaining_seconds=500, grace_remaining=30.0)
         text = AmbientBar._warning_text(s)
         self.assertIn("SHUTTING DOWN", text)
 
@@ -55,8 +56,8 @@ def _detached_bar(hovered=False, brightness_pause_until=0.0):
 
 
 class TestCenterText(unittest.TestCase):
-    CALM = {"remaining_seconds": 50 * 60, "grace_remaining": None}
-    WARN = {"remaining_seconds": 90, "grace_remaining": None}
+    CALM = Snapshot(remaining_seconds=50 * 60, grace_remaining=None)
+    WARN = Snapshot(remaining_seconds=90, grace_remaining=None)
 
     def test_empty_when_calm_and_unhovered(self):
         self.assertEqual(_detached_bar()._center_text(self.CALM), (None, None))
@@ -69,46 +70,47 @@ class TestCenterText(unittest.TestCase):
         self.assertIn("save your work", text)
 
     def test_day_limit_notice_when_refill_gone(self):
-        s = {"remaining_seconds": 50 * 60, "grace_remaining": None, "refill_rate": 0.0}
+        s = Snapshot(remaining_seconds=50 * 60, grace_remaining=None, refill_rate=0.0)
         text, _ = _detached_bar()._center_text(s)
         self.assertIn("day limit reached", text)
 
     def test_warning_takes_priority_over_day_limit_notice(self):
-        s = {"remaining_seconds": 90, "grace_remaining": None, "refill_rate": 0.0}
+        s = Snapshot(remaining_seconds=90, grace_remaining=None, refill_rate=0.0)
         text, _ = _detached_bar()._center_text(s)
         self.assertIn("save your work", text)
 
     def test_no_notice_while_refill_merely_slowed(self):
-        s = {"remaining_seconds": 50 * 60, "grace_remaining": None, "refill_rate": 0.5}
+        s = Snapshot(remaining_seconds=50 * 60, grace_remaining=None, refill_rate=0.5)
         self.assertEqual(_detached_bar()._center_text(s), (None, None))
 
 
 class TestDayFatigueDisplay(unittest.TestCase):
     def test_grace_text_honest_when_no_refill(self):
-        s = {"grace_remaining": 45.0, "remaining_seconds": 0, "refill_rate": 0.0}
+        s = Snapshot(grace_remaining=45.0, remaining_seconds=0, refill_rate=0.0)
         text = AmbientBar._warning_text(s)
         self.assertIn("DAY LIMIT", text)
         self.assertNotIn("go idle", text)
 
     def test_grace_text_offers_idle_escape_with_refill(self):
-        s = {"grace_remaining": 45.0, "remaining_seconds": 0, "refill_rate": 1.0}
+        s = Snapshot(grace_remaining=45.0, remaining_seconds=0, refill_rate=1.0)
         self.assertIn("go idle", AmbientBar._warning_text(s))
 
     def test_history_white_within_budget(self):
-        self.assertEqual(AmbientBar._history_rgb({"refill_rate": 1.0}), (255, 255, 255))
+        self.assertEqual(AmbientBar._history_rgb(Snapshot(refill_rate=1.0)), (255, 255, 255))
 
     def test_history_amber_past_budget(self):
-        self.assertEqual(AmbientBar._history_rgb({"refill_rate": 0.5}), (255, 190, 80))
+        self.assertEqual(AmbientBar._history_rgb(Snapshot(refill_rate=0.5)), (255, 190, 80))
 
     def test_history_red_at_limit(self):
-        self.assertEqual(AmbientBar._history_rgb({"refill_rate": 0.0}), (255, 80, 80))
+        self.assertEqual(AmbientBar._history_rgb(Snapshot(refill_rate=0.0)), (255, 80, 80))
 
-    def test_history_white_when_core_predates_fatigue(self):
-        self.assertEqual(AmbientBar._history_rgb({}), (255, 255, 255))
+    def test_history_white_by_default(self):
+        # refill_rate defaults to 1.0 (no fatigue) when a snapshot omits it.
+        self.assertEqual(AmbientBar._history_rgb(Snapshot()), (255, 255, 255))
 
 
 class TestBrightnessPauseDisplay(unittest.TestCase):
-    CALM = {"remaining_seconds": 50 * 60, "grace_remaining": None}
+    CALM = Snapshot(remaining_seconds=50 * 60, grace_remaining=None)
 
     def test_pause_indicator_shows_when_paused(self):
         bar = _detached_bar(brightness_pause_until=time.time() + 3600)
@@ -130,14 +132,14 @@ class TestBrightnessPauseDisplay(unittest.TestCase):
         self.assertEqual(bar._center_text(self.CALM), (None, None))
 
     def test_warning_takes_priority_over_pause(self):
-        warn = {"remaining_seconds": 90, "grace_remaining": None}
+        warn = Snapshot(remaining_seconds=90, grace_remaining=None)
         bar = _detached_bar(brightness_pause_until=time.time() + 3600)
         text, _ = bar._center_text(warn)
         self.assertIn("save your work", text)
         self.assertNotIn("brightness paused", text)
 
     def test_day_limit_takes_priority_over_pause(self):
-        limit = {"remaining_seconds": 50 * 60, "grace_remaining": None, "refill_rate": 0.0}
+        limit = Snapshot(remaining_seconds=50 * 60, grace_remaining=None, refill_rate=0.0)
         bar = _detached_bar(brightness_pause_until=time.time() + 3600)
         text, _ = bar._center_text(limit)
         self.assertIn("day limit reached", text)
@@ -165,22 +167,22 @@ class TestIsCritical(unittest.TestCase):
         self.assertFalse(bar.is_critical())
 
     def test_in_grace_is_critical(self):
-        bar = self._bar_with_snapshot({"grace_remaining": 40.0, "remaining_seconds": 0})
+        bar = self._bar_with_snapshot(Snapshot(grace_remaining=40.0, remaining_seconds=0))
         self.assertTrue(bar.is_critical())
 
     def test_below_expand_threshold_is_critical(self):
-        bar = self._bar_with_snapshot({"grace_remaining": None, "remaining_seconds": EXPAND_SECONDS - 1})
+        bar = self._bar_with_snapshot(Snapshot(grace_remaining=None, remaining_seconds=EXPAND_SECONDS - 1))
         self.assertTrue(bar.is_critical())
 
     def test_above_expand_threshold_not_critical(self):
-        bar = self._bar_with_snapshot({"grace_remaining": None, "remaining_seconds": EXPAND_SECONDS + 1})
+        bar = self._bar_with_snapshot(Snapshot(grace_remaining=None, remaining_seconds=EXPAND_SECONDS + 1))
         self.assertFalse(bar.is_critical())
 
     def test_no_refill_left_is_critical(self):
         # past the daily limit the bar stays expanded for its final stretch
-        bar = self._bar_with_snapshot({"grace_remaining": None,
-                                       "remaining_seconds": EXPAND_SECONDS + 1,
-                                       "refill_rate": 0.0})
+        bar = self._bar_with_snapshot(Snapshot(grace_remaining=None,
+                                               remaining_seconds=EXPAND_SECONDS + 1,
+                                               refill_rate=0.0))
         self.assertTrue(bar.is_critical())
 
 
