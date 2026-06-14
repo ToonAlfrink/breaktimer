@@ -6,6 +6,7 @@ night still dims the screen rather than blasting cold-bright light.
 
 Run: python3 -m unittest -q
 """
+import logging
 import math
 import os
 import tempfile
@@ -15,6 +16,8 @@ from unittest import mock
 
 import brightness_control
 import status
+
+logging.getLogger("breaktimer").addHandler(logging.NullHandler())
 
 
 def _noon_mock():
@@ -80,6 +83,34 @@ class BrightnessPauseTest(unittest.TestCase):
         with open(status.brightness_pause_path(), "w") as f:
             f.write("garbage")
         self.assertFalse(brightness_control.is_paused())
+
+
+class BrightnessLogTest(unittest.TestCase):
+    """Every real brightness override is logged with its cause; steady state is quiet."""
+
+    def setUp(self):
+        self._apply = mock.patch.object(brightness_control, "_apply_to_all_displays")
+        self._apply.start()
+        self._dt = mock.patch("brightness_control.datetime")
+        self._dt.start().datetime.now.return_value = _noon_mock()  # circadian == 1.0
+        self._paused = mock.patch.object(brightness_control, "is_paused", return_value=False)
+        self._paused.start()
+        brightness_control._last_applied = None
+
+    def tearDown(self):
+        self._paused.stop()
+        self._dt.stop()
+        self._apply.stop()
+
+    def test_change_logs_level_and_cause(self):
+        with self.assertLogs("breaktimer.brightness", level="INFO") as cm:
+            brightness_control.set_brightness_by_fraction(0.5)
+        self.assertTrue(any("50%" in m and "bar 50%" in m for m in cm.output))
+
+    def test_unchanged_level_does_not_relog(self):
+        brightness_control.set_brightness_by_fraction(0.5)
+        with self.assertNoLogs("breaktimer.brightness", level="INFO"):
+            brightness_control.set_brightness_by_fraction(0.5)
 
 
 class CircadianFractionTest(unittest.TestCase):

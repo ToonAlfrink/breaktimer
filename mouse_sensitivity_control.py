@@ -1,5 +1,8 @@
+import logging
 import os
 import re
+
+log = logging.getLogger("breaktimer.mouse")
 
 CONFIG_DEFAULT_FILE = os.path.expanduser(
     "~/.config/cosmic/com.system76.CosmicComp/v1/input_default"
@@ -45,9 +48,18 @@ def _write_speed_to_file(path, value):
     os.replace(tmp, path)
 
 
+# Last speed actually written, so the why-it-acted log records each real change
+# once rather than re-stating the same value every 10s tick.
+_last_value = None
+
+
 def set_sensitivity(value):
     """Set speed value in all COSMIC input configs (range -1.0 to 1.0)."""
+    global _last_value
     value = round(max(-1.0, min(1.0, value)), 2)
+    if value != _last_value:
+        log.info("pointer speed -> %s", value)
+        _last_value = value
     for path in CONFIG_FILES:
         _write_speed_to_file(path, value)
 

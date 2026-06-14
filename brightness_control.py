@@ -1,4 +1,5 @@
 import datetime
+import logging
 import math
 import os
 import subprocess
@@ -7,6 +8,8 @@ import threading
 import time
 
 import status
+
+log = logging.getLogger("breaktimer.brightness")
 
 # Circadian curve: cosine bell peaking at 13:00 (1 pm), troughing at 01:00 (1 am).
 # The floor keeps screens usable at night even with a full bar.
@@ -66,6 +69,10 @@ class _ExternalDisplays:
 
 
 _external_displays = _ExternalDisplays()
+
+# Last percentage actually applied, so the why-it-acted log records each real
+# change once instead of re-stating the same level every 10s tick.
+_last_applied = None
 
 
 def start_external_display_detection():
@@ -150,10 +157,15 @@ def set_brightness_by_fraction(fraction):
     at 1 am still dims the screen to the circadian floor rather than blasting
     cold-bright light. No-op while paused (see pause()/unpause()).
     """
+    global _last_applied
     if is_paused():
         return
     now = datetime.datetime.now()
     hour = now.hour + now.minute / 60
-    combined = fraction * circadian_fraction(hour)
-    percentage = max(0, min(100, int(combined * 100)))
+    circadian = circadian_fraction(hour)
+    percentage = max(0, min(100, int(fraction * circadian * 100)))
+    if percentage != _last_applied:
+        log.info("brightness -> %d%% (bar %d%%, time-of-day %d%%)",
+                 percentage, int(fraction * 100), int(circadian * 100))
+        _last_applied = percentage
     _apply_to_all_displays(percentage)

@@ -1,4 +1,5 @@
 import argparse
+import logging
 import time
 import json
 import os
@@ -12,6 +13,13 @@ import status
 from status import SECONDS_PER_MINUTE, today_str
 from brightness_control import set_brightness_by_fraction, start_external_display_detection
 from mouse_sensitivity_control import set_sensitivity_by_fraction, read_original_sensitivity, restore_sensitivity
+
+# Why-it-acted trail. A daemon that dims the screen and powers the machine off
+# must say why, on the record. Goes to stderr → journald (the systemd services'
+# log; see CLAUDE.md `journalctl --user -u breaktimer-core`). Consequential
+# actions log here; the control modules log their own overrides under
+# breaktimer.{brightness,mouse}.
+log = logging.getLogger("breaktimer.core")
 
 _HISTORY_DAYS = 400  # covers 12-month sparkline + buffer
 
@@ -132,7 +140,7 @@ class ActivityMonitor:
                 self.libinput_process.wait()
 
             except Exception as e:
-                print(f"WARNING: activity monitor failed: {e}", file=sys.stderr)
+                log.warning("activity monitor failed: %s", e)
             finally:
                 self._healthy = False
                 proc, self.libinput_process = self.libinput_process, None
@@ -169,7 +177,7 @@ def load_state_from_file():
             data = json.load(f)
         return TimerState.from_dict(data)
     except (json.JSONDecodeError, ValueError, KeyError) as e:
-        print(f"WARNING: could not read state file ({e}), starting fresh", file=sys.stderr)
+        log.warning("could not read state file (%s), starting fresh", e)
         return None
 
 def compute_offline_duration_seconds(state):
@@ -192,11 +200,12 @@ def execute_shutdown():
     for cmd in shutdown_commands:
         try:
             subprocess.run(cmd, check=True, timeout=10)
+            log.critical("powered off via %s", cmd[0])
             return
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             continue
 
-    print("ERROR: all shutdown commands failed — timer expired but machine is still on", file=sys.stderr)
+    log.error("all shutdown commands failed — timer expired but machine is still on")
 
 
 def run_effect_inline(effect):
@@ -237,7 +246,7 @@ class EffectsWorker:
             try:
                 effect()
             except Exception as e:
-                print(f"WARNING: effect failed: {e}", file=sys.stderr)
+                log.warning("effect failed: %s", e)
 
 
 class TimerLoop:
@@ -310,10 +319,12 @@ class TimerLoop:
         if not self.activity_monitor.is_healthy():
             if "monitor-down" not in self._notified:
                 self._notified.add("monitor-down")
+                log.warning("activity monitor offline — draining at full rate")
                 self._emit("Activity monitor offline — draining at full rate", urgency="critical")
         else:
             if "monitor-down" in self._notified:
                 self._notified.discard("monitor-down")
+                log.info("activity monitor restored")
                 self._emit("Activity monitor restored", urgency="normal")
     
     def _refill_multiplier(self):
@@ -343,12 +354,30 @@ class TimerLoop:
             now = time.monotonic()
             if self.grace_start is None:
                 self.grace_start = now
+                cancellable = self._refill_multiplier() > 0
+                log.warning(
+                    "shutdown grace started: bar empty, %ds to power off (%s)",
+                    self.GRACE_SECONDS,
+                    "cancellable — go idle to refill" if cancellable
+                    else "uncancellable — daily limit reached",
+                )
             if now - self.grace_start >= self.GRACE_SECONDS:
+                log.critical(
+                    "powering off: bar empty through %ds grace; worked %s today, refill at %.0f%%",
+                    self.GRACE_SECONDS,
+                    _fmt_hours(self.state.daily_work_totals.get(today_str(), 0)),
+                    self._refill_multiplier() * 100,
+                )
                 save_state_to_file(self.state)
                 execute_shutdown()
                 return True
         else:
             # Timer refilled (user went idle) — cancel any active grace window
+            if self.grace_start is not None:
+                log.info(
+                    "shutdown grace cancelled: bar refilled to %s (went idle)",
+                    status.format_time(self.state.remaining_time),
+                )
             self.grace_start = None
         return False
     
@@ -400,6 +429,7 @@ class TimerLoop:
             key = f"daily-{name}-{today}"
             if today_total >= threshold and key not in self._notified:
                 self._notified.add(key)
+                log.info("daily %s crossed: worked %s today", name, _fmt_hours(today_total))
                 self._emit(msg, urgency=urgency)
 
     def _write_status(self):
@@ -416,7 +446,7 @@ class TimerLoop:
             snapshot.publish()
         except OSError as e:
             if not self._status_write_warned:
-                print(f"WARNING: cannot publish live status: {e}", file=sys.stderr)
+                log.warning("cannot publish live status: %s", e)
                 self._status_write_warned = True
 
     def tick(self):
@@ -503,9 +533,12 @@ def initialize_state(args, mana_max_seconds):
     return state
 
 def main():
+    # journald already stamps time and unit, so keep the line lean.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
     lock = status.acquire_singleton_lock("core")
     if lock is None:
-        print("breaktimer core already running — exiting", file=sys.stderr)
+        log.error("breaktimer core already running — exiting")
         sys.exit(1)
 
     args = parse_arguments()

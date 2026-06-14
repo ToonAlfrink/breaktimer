@@ -51,13 +51,19 @@ Two independent processes bridged by a live status file:
 - `brightness_control.py` — wraps `brightnessctl`/sysfs/ddcutil to set screen brightness.
 - `mouse_sensitivity_control.py` — rewrites COSMIC input config files to scale pointer speed.
 
-Runtime logs: `journalctl --user -u breaktimer-{core,ambient}.service`.
+Runtime logs: `journalctl --user -u breaktimer-{core,ambient}.service`. The core
+keeps a **why-it-acted trail** there via the `logging` module (`breaktimer.{core,
+brightness,mouse}` loggers): every consequential act — shutdown decision, grace
+entry/cancel, each brightness/pointer override with its cause, daily budget/limit
+crossings — logs its reason, so nothing the daemon does to the machine is silent.
 
 ## Tests
 
 `test_main.py` covers the shutdown-power core (persistence, depletion/replenishment
 arithmetic, refill fatigue, shutdown grace window, notifications, status publishing,
-the unconditional-limit invariant); `test_status.py` covers the status bridge;
+the why-it-acted log trail, the unconditional-limit invariant); `test_status.py`
+covers the status bridge; `test_brightness_control.py` / `test_mouse_sensitivity_control.py`
+cover the screen/pointer overrides (and that each logs its cause once);
 `test_ambient.py` covers headless bar logic and the service files. Run before and
 after any change to the core:
 

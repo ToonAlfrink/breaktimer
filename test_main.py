@@ -9,6 +9,7 @@ Run: python3 -m unittest -q
 import argparse
 import io
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -27,6 +28,11 @@ from main import (
     load_state_from_file,
     save_state_to_file,
 )
+
+
+# Keep the why-it-acted trail out of the test runner's stderr; assertLogs still
+# captures it where a test pins it.
+logging.getLogger("breaktimer").addHandler(logging.NullHandler())
 
 
 class StubMonitor:
@@ -163,6 +169,49 @@ class TestShutdownGrace(InTempDir):
         with mock.patch.object(main, "execute_shutdown"):
             loop._check_shutdown()
         self.assertEqual(loop.state.remaining_time, 0.0)
+
+
+class TestActionTrail(InTempDir):
+    """A daemon that dims the screen and powers the machine off must leave a
+    record of why. These pin that each consequential act logs its reason."""
+
+    def test_grace_start_logs_cancellable_reason(self):
+        loop = make_loop(0)  # under daily limit → refill still possible
+        with mock.patch.object(main, "execute_shutdown"), \
+                self.assertLogs("breaktimer.core", level="WARNING") as cm:
+            loop._check_shutdown()
+        self.assertTrue(any("grace started" in m and "cancellable" in m
+                            for m in cm.output))
+
+    def test_grace_start_logs_uncancellable_past_limit(self):
+        loop = make_loop(0, today_total=10 * 3600)  # at the daily limit
+        with mock.patch.object(main, "execute_shutdown"), \
+                self.assertLogs("breaktimer.core", level="WARNING") as cm:
+            loop._check_shutdown()
+        self.assertTrue(any("uncancellable" in m for m in cm.output))
+
+    def test_shutdown_decision_logs_reason(self):
+        loop = make_loop(0)
+        loop.grace_start = time.monotonic() - TimerLoop.GRACE_SECONDS - 1
+        with mock.patch.object(main, "execute_shutdown"), \
+                self.assertLogs("breaktimer.core", level="CRITICAL") as cm:
+            self.assertTrue(loop._check_shutdown())
+        self.assertTrue(any("powering off" in m for m in cm.output))
+
+    def test_grace_cancellation_is_logged(self):
+        loop = make_loop(120)
+        loop.grace_start = time.monotonic()
+        with mock.patch.object(main, "execute_shutdown"), \
+                self.assertLogs("breaktimer.core", level="INFO") as cm:
+            loop._check_shutdown()
+        self.assertTrue(any("grace cancelled" in m for m in cm.output))
+
+    def test_daily_limit_crossing_is_logged(self):
+        loop = make_loop(900)  # starts below budget so the crossing is genuine
+        loop.state.daily_work_totals[main.today_str()] = 10 * 3600
+        with self.assertLogs("breaktimer.core", level="INFO") as cm:
+            loop._check_notifications()
+        self.assertTrue(any("daily limit crossed" in m for m in cm.output))
 
 
 class TestActivityStatus(unittest.TestCase):
@@ -321,13 +370,12 @@ class TestExecuteShutdown(unittest.TestCase):
             main.execute_shutdown()
         self.assertEqual(calls, ['/usr/bin/busctl'])
 
-    def test_all_fail_logs_error_to_stderr(self):
-        buf = io.StringIO()
+    def test_all_fail_logs_error(self):
         with mock.patch("subprocess.run",
                         side_effect=subprocess.CalledProcessError(1, [])):
-            with mock.patch("sys.stderr", buf):
+            with self.assertLogs("breaktimer.core", level="ERROR") as cm:
                 main.execute_shutdown()
-        self.assertIn("ERROR", buf.getvalue())
+        self.assertIn("all shutdown commands failed", cm.output[0])
 
 
 class TestRestartAfterShutdown(InTempDir):
@@ -505,14 +553,11 @@ class TestWriteStatusOSError(unittest.TestCase):
     def test_warns_once_then_silent(self):
         loop = make_loop(900)
         with mock.patch("status.write_status", side_effect=OSError("no tmpfs")):
-            buf = io.StringIO()
-            with mock.patch("sys.stderr", buf):
+            with self.assertLogs("breaktimer.core", level="WARNING") as cm:
                 loop._write_status()
-                after_first = buf.getvalue()
-                loop._write_status()
-                after_second = buf.getvalue()
-        self.assertIn("WARNING", after_first)
-        self.assertEqual(after_first, after_second)  # no new output on second call
+                loop._write_status()  # second call must stay silent
+        self.assertEqual(len(cm.records), 1)
+        self.assertIn("cannot publish live status", cm.output[0])
 
 
 class TestLiveStatus(unittest.TestCase):
