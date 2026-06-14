@@ -20,7 +20,9 @@ def _prune_daily_work_totals(totals):
     cutoff = (date.today() - timedelta(days=_HISTORY_DAYS)).isoformat()
     return {d: v for d, v in totals.items() if d >= cutoff}
 
-STATE_FILE = "state.json"
+_XDG_STATE_HOME = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+STATE_DIR = os.path.join(_XDG_STATE_HOME, "breaktimer")
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
 SAVE_INTERVAL_SECONDS = 10
 
 # (threshold_seconds, urgency, message) — fired once per descent through each level,
@@ -151,8 +153,10 @@ def save_state_to_file(state):
     state.last_saved_time = time.time()
     state_to_save = state.to_dict()
 
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
     tmp_path = STATE_FILE + ".tmp"
-    with open(tmp_path, 'w') as f:
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
         json.dump(state_to_save, f, indent=4)
     os.replace(tmp_path, STATE_FILE)
 
@@ -173,17 +177,18 @@ def compute_offline_duration_seconds(state):
     return max(0.0, time.time() - state.last_saved_time)
 
 def execute_shutdown():
+    # Use absolute paths to avoid PATH hijacking; skip sudo — systemctl poweroff
+    # goes through logind/polkit and doesn't need a SUID binary.
     shutdown_commands = [
-        ['sudo', '-n', 'shutdown', '-h', 'now'],
-        ['shutdown', '-h', 'now'],
-        ['systemctl', 'poweroff']
+        ['/usr/bin/systemctl', 'poweroff'],
+        ['/sbin/shutdown', '-h', 'now'],
     ]
 
     for cmd in shutdown_commands:
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, timeout=10)
             return
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             continue
 
     print("ERROR: all shutdown commands failed — timer expired but machine is still on", file=sys.stderr)

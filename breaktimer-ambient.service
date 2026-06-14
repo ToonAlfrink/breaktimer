@@ -6,8 +6,12 @@ StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/usr/bin/python3 /home/user/Projects/breaktimer/ambient.py
+WorkingDirectory=/home/user/Projects/breaktimer
 Restart=always
 RestartSec=2
+PrivateTmp=true
+ProtectSystem=strict
+NoNewPrivileges=true
 
 [Install]
 WantedBy=graphical-session.target

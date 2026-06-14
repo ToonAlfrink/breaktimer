@@ -16,7 +16,12 @@ SECONDS_PER_MINUTE = 60
 
 
 def _runtime_dir():
-    return os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    d = os.environ.get("XDG_RUNTIME_DIR")
+    if d:
+        return d
+    # /run/user/<uid> has mode 700 and is managed by systemd-logind.
+    # Never fall back to /tmp which is world-readable.
+    return f"/run/user/{os.getuid()}"
 
 
 def status_path():
@@ -24,10 +29,11 @@ def status_path():
 
 
 def write_status(payload):
-    """Atomically write the live status snapshot."""
+    """Atomically write the live status snapshot (owner-readable only)."""
     path = status_path()
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(payload, f)
     os.replace(tmp, path)
 
@@ -54,7 +60,9 @@ def acquire_singleton_lock(name):
     Returns the open lock file (keep a reference — the lock dies with it)
     or None if another instance already holds it.
     """
-    f = open(os.path.join(_runtime_dir(), f"breaktimer-{name}.lock"), "w")
+    path = os.path.join(_runtime_dir(), f"breaktimer-{name}.lock")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    f = os.fdopen(fd, "w")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return f

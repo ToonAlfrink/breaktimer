@@ -56,15 +56,21 @@ def make_loop(remaining, max_seconds=3600, replenish_seconds=1200,
 
 
 class InTempDir(unittest.TestCase):
-    """Each test runs in a fresh temp cwd so STATE_FILE never touches real state."""
+    """Each test gets a private temp state dir so STATE_FILE never touches real state."""
 
     def setUp(self):
-        self._old_cwd = os.getcwd()
         self._tmp = tempfile.TemporaryDirectory()
-        os.chdir(self._tmp.name)
+        state_dir = os.path.join(self._tmp.name, "breaktimer")
+        os.makedirs(state_dir, mode=0o700)
+        state_file = os.path.join(state_dir, "state.json")
+        self._dir_patch = mock.patch.object(main, "STATE_DIR", state_dir)
+        self._file_patch = mock.patch.object(main, "STATE_FILE", state_file)
+        self._dir_patch.start()
+        self._file_patch.start()
 
     def tearDown(self):
-        os.chdir(self._old_cwd)
+        self._file_patch.stop()
+        self._dir_patch.stop()
         self._tmp.cleanup()
 
 
@@ -85,7 +91,7 @@ class TestStatePersistence(InTempDir):
 
     def test_save_is_atomic_leaves_no_temp_file(self):
         save_state_to_file(TimerState(remaining_time=10))
-        self.assertEqual(os.listdir("."), [main.STATE_FILE])
+        self.assertEqual(os.listdir(main.STATE_DIR), ["state.json"])
 
     def test_missing_file_returns_none(self):
         self.assertIsNone(load_state_from_file())
@@ -255,22 +261,31 @@ class TestInitializeState(InTempDir):
 
 
 class TestExecuteShutdown(unittest.TestCase):
-    """execute_shutdown tries three commands in order; all must be tested."""
+    """execute_shutdown uses absolute paths, no sudo, and falls through on failure."""
 
-    def test_first_command_is_sudo(self):
+    def test_first_command_is_systemctl_absolute(self):
         with mock.patch("subprocess.run") as run:
             main.execute_shutdown()
-        self.assertEqual(run.call_args_list[0].args[0][0], "sudo")
+        self.assertEqual(run.call_args_list[0].args[0], ['/usr/bin/systemctl', 'poweroff'])
 
-    def test_falls_through_on_failure(self):
+    def test_no_sudo_in_any_command(self):
+        calls = []
+        def side_effect(cmd, **kw):
+            calls.append(cmd)
+            raise subprocess.CalledProcessError(1, cmd)
+        with mock.patch("subprocess.run", side_effect=side_effect):
+            main.execute_shutdown()
+        self.assertFalse(any("sudo" in c[0] for c in calls), "sudo must not appear in any shutdown command")
+
+    def test_falls_through_to_shutdown_on_failure(self):
         calls = []
         def side_effect(cmd, **kw):
             calls.append(cmd[0])
-            if cmd[0] != "systemctl":
+            if 'systemctl' not in cmd[0]:
                 raise subprocess.CalledProcessError(1, cmd)
         with mock.patch("subprocess.run", side_effect=side_effect):
             main.execute_shutdown()
-        self.assertEqual(calls, ["sudo", "shutdown", "systemctl"])
+        self.assertEqual(calls, ['/usr/bin/systemctl'])
 
     def test_all_fail_logs_error_to_stderr(self):
         import io
