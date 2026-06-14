@@ -41,8 +41,10 @@ def _write_speed_to_file(path, value):
 
     content = re.sub(r"speed:\s*-?[\d.]+", f"speed: {value}", content)
 
-    with open(path, "w") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
         f.write(content)
+    os.replace(tmp, path)
 
 
 def set_sensitivity(value):

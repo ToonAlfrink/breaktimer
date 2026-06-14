@@ -6,10 +6,19 @@ import subprocess
 import threading
 import sys
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 import status
 from status import SECONDS_PER_MINUTE, today_str
-from brightness_control import set_brightness_by_fraction
+from brightness_control import set_brightness_by_fraction, start_external_display_detection
 from mouse_sensitivity_control import set_sensitivity_by_fraction, save_original_sensitivity, restore_original_sensitivity
+
+_HISTORY_DAYS = 400  # covers 12-month sparkline + buffer
+
+
+def _prune_daily_work_totals(totals):
+    """Drop entries older than _HISTORY_DAYS to keep the dict bounded."""
+    cutoff = (date.today() - timedelta(days=_HISTORY_DAYS)).isoformat()
+    return {d: v for d, v in totals.items() if d >= cutoff}
 
 STATE_FILE = "state.json"
 SAVE_INTERVAL_SECONDS = 10
@@ -49,7 +58,7 @@ class TimerState:
         """The durable subset, for JSON persistence."""
         return {
             "remaining_time": self.remaining_time,
-            "daily_work_totals": self.daily_work_totals,
+            "daily_work_totals": _prune_daily_work_totals(self.daily_work_totals),
             "last_saved_time": self.last_saved_time,
         }
 
@@ -57,7 +66,7 @@ class TimerState:
     def from_dict(cls, data):
         return cls(
             remaining_time=data.get("remaining_time", float("inf")),
-            daily_work_totals=data.get("daily_work_totals", {}),
+            daily_work_totals=_prune_daily_work_totals(data.get("daily_work_totals", {})),
             last_saved_time=data.get("last_saved_time")
         )
 
@@ -429,6 +438,7 @@ def main():
 
     activity_monitor = ActivityMonitor()
     activity_monitor.start()
+    start_external_display_detection()
 
     save_original_sensitivity()
 

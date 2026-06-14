@@ -3,6 +3,7 @@ import math
 import os
 import subprocess
 import glob
+import threading
 import time
 
 import status
@@ -23,6 +24,33 @@ def circadian_fraction(hour: float) -> float:
     return _CIRCADIAN_FLOOR + (1 - _CIRCADIAN_FLOOR) * (1 + math.cos(angle)) / 2
 
 _external_displays_cache = None
+_detect_lock = threading.Lock()
+
+
+def _run_detection():
+    global _external_displays_cache
+    displays = []
+    try:
+        result = subprocess.run(['ddcutil', 'detect', '--brief'],
+                                capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            for line in result.stdout.split('\n'):
+                if line.strip().startswith('Display'):
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            displays.append(int(parts[1]))
+                        except ValueError:
+                            pass
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    with _detect_lock:
+        _external_displays_cache = displays
+
+
+def start_external_display_detection():
+    """Kick off ddcutil detect in a background thread so the timer loop never blocks."""
+    threading.Thread(target=_run_detection, daemon=True).start()
 
 
 def set_brightness(level):
@@ -47,29 +75,9 @@ def set_brightness(level):
         pass
 
 def get_external_displays():
-    """Get list of external displays that support DDC/CI. Result is cached for the process lifetime."""
-    global _external_displays_cache
-    if _external_displays_cache is not None:
-        return _external_displays_cache
-
-    displays = []
-    try:
-        result = subprocess.run(['ddcutil', 'detect', '--brief'],
-                                capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            for line in result.stdout.split('\n'):
-                if line.strip().startswith('Display'):
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        try:
-                            displays.append(int(parts[1]))
-                        except ValueError:
-                            pass
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    _external_displays_cache = displays
-    return displays
+    """Return cached list of DDC/CI-capable displays ([] if detection not yet complete)."""
+    with _detect_lock:
+        return [] if _external_displays_cache is None else list(_external_displays_cache)
 
 def set_external_brightness(display_num, level):
     """Set brightness of an external monitor via ddcutil (0-100)."""
