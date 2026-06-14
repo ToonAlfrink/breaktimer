@@ -2,6 +2,7 @@ import argparse
 import time
 import json
 import os
+import queue
 import subprocess
 import threading
 import sys
@@ -198,6 +199,47 @@ def execute_shutdown():
     print("ERROR: all shutdown commands failed — timer expired but machine is still on", file=sys.stderr)
 
 
+def run_effect_inline(effect):
+    """Default dispatcher: run an effect synchronously, on the caller's thread.
+    Used in tests and anywhere determinism matters more than isolation."""
+    effect()
+
+
+class EffectsWorker:
+    """Runs slow external side effects (brightness, pointer speed, desktop
+    notifications) on a dedicated thread, so a blocking subprocess — ddcutil
+    stalling on a misbehaving monitor, notify-send waiting on a busy bus — can
+    never delay the 1 Hz heartbeat, status publishing, or the shutdown-grace
+    countdown. Effects are fire-and-forget and best-effort: a full queue drops
+    the oldest pending job, since the next tick re-submits fresh state anyway."""
+
+    def __init__(self, maxsize=32):
+        self._queue = queue.Queue(maxsize)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def submit(self, effect):
+        try:
+            self._queue.put_nowait(effect)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()  # drop the stalest job to make room
+                self._queue.put_nowait(effect)
+            except queue.Empty:
+                pass
+
+    def _run(self):
+        while True:
+            effect = self._queue.get()
+            try:
+                effect()
+            except Exception as e:
+                print(f"WARNING: effect failed: {e}", file=sys.stderr)
+
+
 class TimerLoop:
     """The headless timer core: ticks once a second, adjusts the mana bar,
     publishes the live snapshot, and powers the machine off at zero."""
@@ -213,9 +255,14 @@ class TimerLoop:
     MAX_TICK_SECONDS = SECONDS_PER_MINUTE
 
     def __init__(self, state, offline_duration_seconds, activity_monitor, mana_max_seconds,
-                 mana_replenish_seconds, daily_budget_seconds, daily_limit_seconds):
+                 mana_replenish_seconds, daily_budget_seconds, daily_limit_seconds,
+                 dispatch=run_effect_inline):
         self.state = state
         self.activity_monitor = activity_monitor
+        # How blocking side effects leave the timer thread. Defaults to inline
+        # (synchronous, deterministic); production injects EffectsWorker.submit
+        # so a slow subprocess can't stall the heartbeat.
+        self._dispatch = dispatch
         self.mana_max_seconds = mana_max_seconds
         self.mana_replenish_seconds = mana_replenish_seconds
         self.daily_budget_seconds = daily_budget_seconds
@@ -239,6 +286,10 @@ class TimerLoop:
             if today_total >= threshold:
                 self._notified.add(f"daily-{name}-{today_str()}")
     
+    def _emit(self, body, urgency="normal"):
+        """Fire a desktop notification off the timer thread."""
+        self._dispatch(lambda: _notify(body, urgency=urgency))
+
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
         if not self.activity_monitor.is_healthy():
             # Can't see input — conservatively treat as active so the bar drains.
@@ -259,11 +310,11 @@ class TimerLoop:
         if not self.activity_monitor.is_healthy():
             if "monitor-down" not in self._notified:
                 self._notified.add("monitor-down")
-                _notify("Activity monitor offline — draining at full rate", urgency="critical")
+                self._emit("Activity monitor offline — draining at full rate", urgency="critical")
         else:
             if "monitor-down" in self._notified:
                 self._notified.discard("monitor-down")
-                _notify("Activity monitor restored", urgency="normal")
+                self._emit("Activity monitor restored", urgency="normal")
     
     def _refill_multiplier(self):
         """Refill fatigue: 1.0 until the daily budget, decaying linearly to 0.0
@@ -303,8 +354,8 @@ class TimerLoop:
     
     def _apply_adjustments(self, remaining_fraction, current_loop_time):
         if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
-            set_brightness_by_fraction(remaining_fraction)
-            set_sensitivity_by_fraction(remaining_fraction)
+            self._dispatch(lambda: set_brightness_by_fraction(remaining_fraction))
+            self._dispatch(lambda: set_sensitivity_by_fraction(remaining_fraction))
             self.last_adjustment_time = current_loop_time
     
     def _grace_remaining(self):
@@ -324,7 +375,7 @@ class TimerLoop:
                     msg = f"Shutting down in {int(grace) + 1}s — go idle to cancel"
                 else:
                     msg = f"Day limit reached — shutting down in {int(grace) + 1}s"
-                _notify(msg, urgency="critical")
+                self._emit(msg, urgency="critical")
         else:
             self._notified.discard("grace")
 
@@ -332,7 +383,7 @@ class TimerLoop:
             if remaining <= threshold:
                 if threshold not in self._notified:
                     self._notified.add(threshold)
-                    _notify(msg, urgency=urgency)
+                    self._emit(msg, urgency=urgency)
             else:
                 self._notified.discard(threshold)
 
@@ -349,7 +400,7 @@ class TimerLoop:
             key = f"daily-{name}-{today}"
             if today_total >= threshold and key not in self._notified:
                 self._notified.add(key)
-                _notify(msg, urgency=urgency)
+                self._emit(msg, urgency=urgency)
 
     def _write_status(self):
         """Publish the live snapshot for ambient surfaces (see status.py)."""
@@ -369,30 +420,39 @@ class TimerLoop:
                 print(f"WARNING: cannot publish live status: {e}", file=sys.stderr)
                 self._status_write_warned = True
 
+    def tick(self):
+        """Advance the timer by one step: meter time, drive side effects, persist.
+        Returns True when the shutdown grace has elapsed and the machine should
+        power off. Free of cadence — run() owns the clock — so it's the single
+        seam tests drive one step at a time."""
+        current_loop_time = time.monotonic()
+        time_since_last_loop = current_loop_time - self.last_loop_time
+
+        self._update_activity_status(current_loop_time, time_since_last_loop)
+        self._check_monitor_health()
+        # Meter at most one bounded step, even if the raw gap was longer (the
+        # raw gap above still drives activity detection, so a long gap reads
+        # as idle rather than draining).
+        self._adjust_timer(min(time_since_last_loop, self.MAX_TICK_SECONDS))
+        if self._check_shutdown():
+            return True
+
+        remaining_fraction = self.state.remaining_time / self.mana_max_seconds
+        self._apply_adjustments(remaining_fraction, current_loop_time)
+        self._check_notifications()
+        self._write_status()
+
+        if current_loop_time - self.last_save_time >= SAVE_INTERVAL_SECONDS:
+            save_state_to_file(self.state)
+            self.last_save_time = current_loop_time
+
+        self.last_loop_time = current_loop_time
+        return False
+
     def run(self):
         while True:
-            current_loop_time = time.monotonic()
-            time_since_last_loop = current_loop_time - self.last_loop_time
-
-            self._update_activity_status(current_loop_time, time_since_last_loop)
-            self._check_monitor_health()
-            # Meter at most one bounded step, even if the raw gap was longer (the
-            # raw gap above still drives activity detection, so a long gap reads
-            # as idle rather than draining).
-            self._adjust_timer(min(time_since_last_loop, self.MAX_TICK_SECONDS))
-            if self._check_shutdown():
+            if self.tick():
                 sys.exit(0)
-            
-            remaining_fraction = self.state.remaining_time / self.mana_max_seconds
-            self._apply_adjustments(remaining_fraction, current_loop_time)
-            self._check_notifications()
-            self._write_status()
-
-            if current_loop_time - self.last_save_time >= SAVE_INTERVAL_SECONDS:
-                save_state_to_file(self.state)
-                self.last_save_time = current_loop_time
-
-            self.last_loop_time = current_loop_time
             time.sleep(1)
 
 
@@ -459,6 +519,8 @@ def main():
     activity_monitor.start()
     start_external_display_detection()
 
+    effects = EffectsWorker().start()
+
     save_original_sensitivity()
 
     # Offline duration is wall-clock (it spans a process/boot gap); fold it into
@@ -475,6 +537,7 @@ def main():
             mana_replenish_seconds,
             args.daily_budget_minutes * SECONDS_PER_MINUTE,
             args.daily_limit_minutes * SECONDS_PER_MINUTE,
+            dispatch=effects.submit,
         )
         timer_loop.run()
 

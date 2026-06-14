@@ -7,6 +7,7 @@ is pinned here against regression.
 Run: python3 -m unittest -q
 """
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -204,14 +205,12 @@ class TestClockResilience(InTempDir):
 
     def _run_one_tick(self, loop, jumped):
         with mock.patch("main.time.monotonic", return_value=jumped), \
-             mock.patch("main.time.sleep", side_effect=StopIteration), \
              mock.patch.object(main, "execute_shutdown") as shutdown, \
              mock.patch.object(main, "set_brightness_by_fraction"), \
              mock.patch.object(main, "set_sensitivity_by_fraction"), \
              mock.patch.object(main, "_notify"), \
              mock.patch.object(status, "write_status"):
-            with self.assertRaises(StopIteration):
-                loop.run()
+            loop.tick()
         return shutdown
 
     def test_giant_tick_meters_at_most_max_and_does_not_shut_down(self):
@@ -303,7 +302,6 @@ class TestExecuteShutdown(unittest.TestCase):
         self.assertIn('PowerOff', first)
 
     def test_no_sudo_in_any_command(self):
-        import io
         calls = []
         def side_effect(cmd, **kw):
             calls.append(cmd)
@@ -324,7 +322,6 @@ class TestExecuteShutdown(unittest.TestCase):
         self.assertEqual(calls, ['/usr/bin/busctl'])
 
     def test_all_fail_logs_error_to_stderr(self):
-        import io
         buf = io.StringIO()
         with mock.patch("subprocess.run",
                         side_effect=subprocess.CalledProcessError(1, [])):
@@ -506,7 +503,6 @@ class TestNotifications(unittest.TestCase):
 
 class TestWriteStatusOSError(unittest.TestCase):
     def test_warns_once_then_silent(self):
-        import io
         loop = make_loop(900)
         with mock.patch("status.write_status", side_effect=OSError("no tmpfs")):
             buf = io.StringIO()
@@ -680,6 +676,61 @@ class TestDailyNotifications(unittest.TestCase):
         with mock.patch.object(main, "_notify") as notif:
             loop._check_notifications()
         self.assertIn("go idle to cancel", notif.call_args.args[0])
+
+
+class TestEffectsWorker(unittest.TestCase):
+    """The worker isolates the heartbeat from blocking external IO: slow or
+    failing effects must run off-thread without stalling or crashing the loop."""
+
+    def _drain(self, worker, predicate, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_runs_submitted_effects(self):
+        worker = main.EffectsWorker().start()
+        ran = []
+        worker.submit(lambda: ran.append(1))
+        self.assertTrue(self._drain(worker, lambda: ran))
+
+    def test_one_failing_effect_does_not_kill_the_worker(self):
+        worker = main.EffectsWorker().start()
+        ran = []
+        with mock.patch("sys.stderr", io.StringIO()):
+            worker.submit(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+            worker.submit(lambda: ran.append("after"))
+            self.assertTrue(self._drain(worker, lambda: ran))
+
+    def test_full_queue_drops_oldest_never_blocks_submitter(self):
+        # An unstarted worker never drains, so the queue fills; submit must stay
+        # non-blocking (the heartbeat can't afford to wait on a wedged effect).
+        worker = main.EffectsWorker(maxsize=2)
+        for _ in range(100):
+            worker.submit(lambda: None)  # would deadlock if submit ever blocked
+
+
+class TestDispatchDecoupling(unittest.TestCase):
+    """Side effects leave the timer thread through the injected dispatcher; the
+    loop itself never calls a blocking subprocess directly."""
+
+    def test_notifications_go_through_dispatch(self):
+        seen = []
+        loop = make_loop(600)
+        loop._dispatch = seen.append
+        loop.activity_monitor = StubMonitor(healthy=False)
+        loop._check_monitor_health()
+        self.assertEqual(len(seen), 1)
+
+    def test_adjustments_go_through_dispatch(self):
+        seen = []
+        loop = make_loop(3600)
+        loop._dispatch = seen.append
+        loop.last_adjustment_time = time.monotonic() - 999
+        loop._apply_adjustments(0.5, time.monotonic())
+        self.assertEqual(len(seen), 2)  # brightness + sensitivity
 
 
 if __name__ == "__main__":
