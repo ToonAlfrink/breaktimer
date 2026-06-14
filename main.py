@@ -69,50 +69,71 @@ class ActivityMonitor:
         self.libinput_process = None
         self.monitor_thread = None
         self.lock = threading.Lock()
-    
+        self._healthy = False
+        self._stop_event = threading.Event()
+
     def start(self):
         self.is_running = True
         self.monitor_thread = threading.Thread(target=self._monitor_thread, daemon=True)
         self.monitor_thread.start()
-    
+
     def stop(self):
         self.is_running = False
+        self._stop_event.set()
         if self.libinput_process:
             self.libinput_process.terminate()
             self.libinput_process.wait()
-    
+
+    def is_healthy(self):
+        """True while libinput is running and feeding events."""
+        return self._healthy
+
     def get_last_activity_time(self):
         with self.lock:
             return self.last_activity_time
-    
+
     def set_last_activity_time(self, timestamp):
         with self.lock:
             self.last_activity_time = timestamp
-    
+
     def _monitor_thread(self):
-        try:
-            self.libinput_process = subprocess.Popen(
-                ['libinput', 'debug-events'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
-            
-            for line in self.libinput_process.stdout:
-                if not self.is_running:
-                    break
-                    
-                if line.strip():
-                    with self.lock:
-                        self.last_activity_time = time.time()
-                    
-        except Exception as e:
-            print(f"\nWARNING: activity monitor failed: {e}", file=sys.stderr)
-        finally:
-            if self.libinput_process:
-                self.libinput_process.terminate()
+        backoff = 1
+        while self.is_running:
+            try:
+                self.libinput_process = subprocess.Popen(
+                    ['libinput', 'debug-events'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+                self._healthy = True
+                backoff = 1
+
+                for line in self.libinput_process.stdout:
+                    if not self.is_running:
+                        break
+                    if line.strip():
+                        with self.lock:
+                            self.last_activity_time = time.time()
+
                 self.libinput_process.wait()
+
+            except Exception as e:
+                print(f"WARNING: activity monitor failed: {e}", file=sys.stderr)
+            finally:
+                self._healthy = False
+                proc, self.libinput_process = self.libinput_process, None
+                if proc:
+                    try:
+                        proc.terminate()
+                        proc.wait()
+                    except Exception:
+                        pass
+
+            if self.is_running:
+                self._stop_event.wait(backoff)
+                backoff = min(backoff * 2, 60)
 
 
 def save_state_to_file(state):
@@ -194,6 +215,11 @@ class TimerLoop:
                 self._notified.add(f"daily-{name}-{today_str()}")
     
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
+        if not self.activity_monitor.is_healthy():
+            # Can't see input — conservatively treat as active so the bar drains.
+            self.state.is_active = True
+            return
+
         last_activity_time = self.activity_monitor.get_last_activity_time()
         elapsed = current_loop_time - last_activity_time
 
@@ -202,6 +228,17 @@ class TimerLoop:
             self.state.is_active = False
         else:
             self.state.is_active = elapsed <= self.ACTIVITY_THRESHOLD_SECONDS
+
+    def _check_monitor_health(self):
+        """Notify once when libinput goes down or comes back up."""
+        if not self.activity_monitor.is_healthy():
+            if "monitor-down" not in self._notified:
+                self._notified.add("monitor-down")
+                _notify("Activity monitor offline — draining at full rate", urgency="critical")
+        else:
+            if "monitor-down" in self._notified:
+                self._notified.discard("monitor-down")
+                _notify("Activity monitor restored", urgency="normal")
     
     def _refill_multiplier(self):
         """Refill fatigue: 1.0 until the daily budget, decaying linearly to 0.0
@@ -297,6 +334,7 @@ class TimerLoop:
             "is_active": self.state.is_active,
             "grace_remaining": self._grace_remaining(),
             "refill_rate": self._refill_multiplier(),
+            "monitor_down": not self.activity_monitor.is_healthy(),
             "history": status.format_history_line(self.state.daily_work_totals),
         }
         try:
@@ -312,6 +350,7 @@ class TimerLoop:
             time_since_last_loop = current_loop_time - self.last_loop_time
 
             self._update_activity_status(current_loop_time, time_since_last_loop)
+            self._check_monitor_health()
             self._adjust_timer(time_since_last_loop)
             if self._check_shutdown():
                 sys.exit(0)

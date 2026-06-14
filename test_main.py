@@ -31,14 +31,18 @@ from main import (
 class StubMonitor:
     """Stands in for ActivityMonitor without spawning libinput."""
 
-    def __init__(self):
+    def __init__(self, healthy=True):
         self._t = time.time()
+        self._healthy = healthy
 
     def get_last_activity_time(self):
         return self._t
 
     def set_last_activity_time(self, t):
         self._t = t
+
+    def is_healthy(self):
+        return self._healthy
 
 
 def make_loop(remaining, max_seconds=3600, replenish_seconds=1200,
@@ -176,6 +180,52 @@ class TestActivityStatus(unittest.TestCase):
         loop.activity_monitor.set_last_activity_time(now)
         loop._update_activity_status(now, 500)
         self.assertFalse(loop.state.is_active)
+
+    def test_unhealthy_monitor_always_marks_active(self):
+        # If libinput can't run we can't see input — conservatively assume active
+        # so the bar drains rather than refilling forever.
+        loop = make_loop(600)
+        loop.activity_monitor = StubMonitor(healthy=False)
+        now = time.time()
+        loop.activity_monitor.set_last_activity_time(now - 300)  # would be idle if healthy
+        loop._update_activity_status(now, 1)
+        self.assertTrue(loop.state.is_active)
+
+
+class TestMonitorHealthNotification(unittest.TestCase):
+    def test_fires_critical_when_monitor_goes_down(self):
+        loop = make_loop(600)
+        loop.activity_monitor = StubMonitor(healthy=False)
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_monitor_health()
+        notif.assert_called_once()
+        self.assertEqual(notif.call_args.kwargs["urgency"], "critical")
+
+    def test_fires_only_once_not_every_tick(self):
+        loop = make_loop(600)
+        loop.activity_monitor = StubMonitor(healthy=False)
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_monitor_health()
+            loop._check_monitor_health()
+        self.assertEqual(notif.call_count, 1)
+
+    def test_notifies_recovery_and_clears_flag(self):
+        loop = make_loop(600)
+        loop.activity_monitor = StubMonitor(healthy=False)
+        with mock.patch.object(main, "_notify"):
+            loop._check_monitor_health()
+        self.assertIn("monitor-down", loop._notified)
+        loop.activity_monitor = StubMonitor(healthy=True)
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_monitor_health()
+        self.assertNotIn("monitor-down", loop._notified)
+        notif.assert_called_once()
+
+    def test_no_noise_when_healthy(self):
+        loop = make_loop(600)  # StubMonitor defaults to healthy=True
+        with mock.patch.object(main, "_notify") as notif:
+            loop._check_monitor_health()
+        notif.assert_not_called()
 
 
 class TestInitializeState(InTempDir):
@@ -431,6 +481,7 @@ class TestLiveStatus(unittest.TestCase):
         self.assertEqual(snap["max_seconds"], 3600)
         self.assertAlmostEqual(snap["grace_remaining"], 50, delta=2)
         self.assertIn("history", snap)
+        self.assertFalse(snap["monitor_down"])  # StubMonitor is healthy
 
 
 class TestUnconditionalLimit(unittest.TestCase):
