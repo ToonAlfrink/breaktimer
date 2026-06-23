@@ -52,9 +52,10 @@ def cmd_brightness_on():
 
 def cmd_blocklist():
     state_dir = _main.STATE_DIR
-    blocklist.blocklist_file        = os.path.join(state_dir, "blocklist.txt")
-    blocklist.blocklist_active_file = os.path.join(state_dir, "blocklist-active.txt")
-    blocklist.blocklist_strict_file = os.path.join(state_dir, "blocklist-strict.txt")
+    blocklist.blocklist_file          = os.path.join(state_dir, "blocklist.txt")
+    blocklist.blocklist_active_file   = os.path.join(state_dir, "blocklist-active.txt")
+    blocklist.blocklist_strict_file   = os.path.join(state_dir, "blocklist-strict.txt")
+    blocklist.blocklist_schedule_file = os.path.join(state_dir, "blocklist-schedule.txt")
 
     snap = status.Snapshot.read(max_age_seconds=10)
     is_active = snap.is_active if snap else False
@@ -69,15 +70,17 @@ def cmd_blocklist():
                 lines.append(f"    {d}  +  www.{d}  →  0.0.0.0")
         return lines
 
-    always  = blocklist.read_domains()
-    active  = blocklist.read_domains_active()
-    strict_ = blocklist.read_domains_strict()
+    always   = blocklist.read_domains()
+    active   = blocklist.read_domains_active()
+    strict_  = blocklist.read_domains_strict()
+    schedule = blocklist.read_domains_schedule()
 
-    if not (always or active or strict_):
-        print(f"no domains blocked")
-        print(f"  always:  {blocklist.blocklist_file}")
-        print(f"  active:  {blocklist.blocklist_active_file}  (blocked during work sessions)")
-        print(f"  strict:  {blocklist.blocklist_strict_file}  (blocked when daily refill is gone)")
+    if not (always or active or strict_ or schedule):
+        print("no domains blocked")
+        print(f"  always:   {blocklist.blocklist_file}")
+        print(f"  active:   {blocklist.blocklist_active_file}  (blocked during work sessions)")
+        print(f"  strict:   {blocklist.blocklist_strict_file}  (blocked when daily refill is gone)")
+        print(f"  schedule: {blocklist.blocklist_schedule_file}  (blocked during time windows)")
         return
 
     if always:
@@ -91,6 +94,9 @@ def cmd_blocklist():
         tag = "● enforced" if strict else "○ not yet (refill still available)"
         print(f"strict/day-limit blocked ({len(strict_)}) [{tag}]:")
         print("\n".join(_fmt(strict_)))
+    if schedule:
+        print(f"schedule blocked ({len(schedule)}) [● window active now]:")
+        print("\n".join(_fmt(schedule)))
 
 
 def cmd_url(port=8642):

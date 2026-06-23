@@ -2,8 +2,8 @@
 
 The blocklist module maintains a marked-off sinkhole block in /etc/hosts,
 rewriting it atomically and logging every mutation via the why-it-acted trail.
-Three tiers: always-blocked, work-session-blocked (is_active), and
-strict/day-limit-blocked (strict).
+Four tiers: always-blocked, work-session-blocked (is_active),
+strict/day-limit-blocked (strict), and schedule-blocked (time windows).
 
 Run: python3 -m unittest -q
 """
@@ -48,17 +48,25 @@ def _set_strict(tmpdir, content):
     return path
 
 
+def _set_schedule(tmpdir, content):
+    path = os.path.join(tmpdir, "blocklist-schedule.txt")
+    _write_file(path, content)
+    blocklist.blocklist_schedule_file = path
+    return path
+
+
 class InTempDir(unittest.TestCase):
     """Each test gets an isolated tmpdir and a clean module state."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         # Reset module-level state between tests.
-        blocklist.blocklist_file = None
-        blocklist.blocklist_active_file = None
-        blocklist.blocklist_strict_file = None
-        blocklist._last_written = None
-        blocklist._write_failed = False
+        blocklist.blocklist_file          = None
+        blocklist.blocklist_active_file   = None
+        blocklist.blocklist_strict_file   = None
+        blocklist.blocklist_schedule_file = None
+        blocklist._last_written  = None
+        blocklist._write_failed  = False
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -467,6 +475,200 @@ class TestBlocklistActionTrail(InTempDir):
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
             blocklist.apply(is_active=True)
         self.assertTrue(any("twitter.com" in m for m in cm.output))
+
+
+# ---------------------------------------------------------------------------
+# Schedule tier
+# ---------------------------------------------------------------------------
+
+class TestInWindow(unittest.TestCase):
+    """_in_window: same-day, wrap-around, and edge cases."""
+
+    def test_same_day_window_inside(self):
+        self.assertTrue(blocklist._in_window(9 * 60, 17 * 60, 12 * 60))
+
+    def test_same_day_window_at_start(self):
+        self.assertTrue(blocklist._in_window(9 * 60, 17 * 60, 9 * 60))
+
+    def test_same_day_window_at_end_exclusive(self):
+        self.assertFalse(blocklist._in_window(9 * 60, 17 * 60, 17 * 60))
+
+    def test_same_day_window_before(self):
+        self.assertFalse(blocklist._in_window(9 * 60, 17 * 60, 8 * 60))
+
+    def test_same_day_window_after(self):
+        self.assertFalse(blocklist._in_window(9 * 60, 17 * 60, 18 * 60))
+
+    def test_wraparound_window_late_night(self):
+        # 22:00-08:00 — 23:00 is inside
+        self.assertTrue(blocklist._in_window(22 * 60, 8 * 60, 23 * 60))
+
+    def test_wraparound_window_early_morning(self):
+        # 22:00-08:00 — 03:00 is inside
+        self.assertTrue(blocklist._in_window(22 * 60, 8 * 60, 3 * 60))
+
+    def test_wraparound_window_at_start(self):
+        self.assertTrue(blocklist._in_window(22 * 60, 8 * 60, 22 * 60))
+
+    def test_wraparound_window_at_end_exclusive(self):
+        self.assertFalse(blocklist._in_window(22 * 60, 8 * 60, 8 * 60))
+
+    def test_wraparound_window_midday_outside(self):
+        self.assertFalse(blocklist._in_window(22 * 60, 8 * 60, 12 * 60))
+
+    def test_zero_length_window_never_active(self):
+        self.assertFalse(blocklist._in_window(9 * 60, 9 * 60, 9 * 60))
+
+
+class TestScheduleTier(InTempDir):
+    """Schedule tier: time-window-gated domain blocking."""
+
+    def test_missing_file_returns_empty(self):
+        blocklist.blocklist_schedule_file = os.path.join(self.tmpdir, "missing.txt")
+        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
+
+    def test_no_file_configured_returns_empty(self):
+        blocklist.blocklist_schedule_file = None
+        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
+
+    def test_in_window_returns_domains(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nreddit.com\n")
+        result = blocklist.read_domains_schedule(now_min=12 * 60)
+        self.assertEqual(result, ["reddit.com"])
+
+    def test_out_of_window_returns_empty(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nreddit.com\n")
+        result = blocklist.read_domains_schedule(now_min=20 * 60)
+        self.assertEqual(result, [])
+
+    def test_wraparound_window_inside(self):
+        _set_schedule(self.tmpdir, "# 22:00-08:00\nyoutube.com\n")
+        self.assertEqual(blocklist.read_domains_schedule(now_min=23 * 60), ["youtube.com"])
+
+    def test_wraparound_window_outside(self):
+        _set_schedule(self.tmpdir, "# 22:00-08:00\nyoutube.com\n")
+        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
+
+    def test_multiple_windows_both_active(self):
+        content = "# 09:00-17:00\nwork.com\n\n# 22:00-08:00\nyoutube.com\n"
+        _set_schedule(self.tmpdir, content)
+        # 23:00 is in the 22:00-08:00 window but NOT in 09:00-17:00
+        result = blocklist.read_domains_schedule(now_min=23 * 60)
+        self.assertEqual(result, ["youtube.com"])
+
+    def test_multiple_windows_first_active(self):
+        content = "# 09:00-17:00\nwork.com\n\n# 22:00-08:00\nnight.com\n"
+        _set_schedule(self.tmpdir, content)
+        result = blocklist.read_domains_schedule(now_min=12 * 60)
+        self.assertEqual(result, ["work.com"])
+
+    def test_domains_before_first_window_are_ignored(self):
+        content = "orphan.com\n# 09:00-17:00\nvalid.com\n"
+        _set_schedule(self.tmpdir, content)
+        result = blocklist.read_domains_schedule(now_min=12 * 60)
+        self.assertNotIn("orphan.com", result)
+        self.assertIn("valid.com", result)
+
+    def test_empty_file_returns_empty(self):
+        _set_schedule(self.tmpdir, "")
+        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
+
+    def test_comment_only_file_returns_empty(self):
+        _set_schedule(self.tmpdir, "# just a comment\n# another comment\n")
+        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
+
+    def test_deduplicates_across_active_windows(self):
+        content = "# 09:00-17:00\ndup.com\n\n# 10:00-16:00\ndup.com\n"
+        _set_schedule(self.tmpdir, content)
+        result = blocklist.read_domains_schedule(now_min=12 * 60)
+        self.assertEqual(result, ["dup.com"])
+
+    def test_returns_sorted_domains(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nzebra.com\napple.com\n")
+        result = blocklist.read_domains_schedule(now_min=12 * 60)
+        self.assertEqual(result, ["apple.com", "zebra.com"])
+
+    def test_normalises_to_lowercase(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nReddit.COM\n")
+        result = blocklist.read_domains_schedule(now_min=12 * 60)
+        self.assertEqual(result, ["reddit.com"])
+
+
+class TestScheduleTierApply(InTempDir):
+    """apply() integrates the schedule tier with /etc/hosts and the log trail."""
+
+    def setUp(self):
+        super().setUp()
+        self._hosts = os.path.join(self.tmpdir, "hosts")
+        with open(self._hosts, "w") as f:
+            f.write("127.0.0.1 localhost\n")
+        self._hosts_patch = mock.patch.object(blocklist, "HOSTS_PATH", self._hosts)
+        self._hosts_patch.start()
+
+    def tearDown(self):
+        self._hosts_patch.stop()
+        super().tearDown()
+
+    def _hosts_content(self):
+        with open(self._hosts) as f:
+            return f.read()
+
+    def test_schedule_domains_blocked_during_active_window(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
+        blocklist.apply(_now_min=12 * 60)
+        self.assertIn("schedule.com", self._hosts_content())
+
+    def test_schedule_domains_not_blocked_outside_window(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
+        blocklist.apply(_now_min=20 * 60)
+        self.assertNotIn("schedule.com", self._hosts_content())
+
+    def test_schedule_tier_combined_with_always(self):
+        _set_always(self.tmpdir, "always.com\n")
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
+        blocklist.apply(_now_min=12 * 60)
+        content = self._hosts_content()
+        self.assertIn("always.com", content)
+        self.assertIn("schedule.com", content)
+
+    def test_schedule_domain_in_always_appears_once(self):
+        _set_always(self.tmpdir, "dup.com\n")
+        _set_schedule(self.tmpdir, "# 09:00-17:00\ndup.com\n")
+        blocklist.apply(_now_min=12 * 60)
+        self.assertEqual(self._hosts_content().count("0.0.0.0 dup.com"), 1)
+
+    def test_schedule_tier_label_in_log(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
+        with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
+            blocklist.apply(_now_min=12 * 60)
+        self.assertTrue(any("schedule:" in m for m in cm.output))
+
+    def test_schedule_domain_appears_in_log(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
+        with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
+            blocklist.apply(_now_min=12 * 60)
+        self.assertTrue(any("schedule.com" in m for m in cm.output))
+
+    def test_schedule_independent_of_is_active(self):
+        """Schedule tier fires even when is_active=False."""
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nquiet.com\n")
+        blocklist.apply(is_active=False, _now_min=12 * 60)
+        self.assertIn("quiet.com", self._hosts_content())
+
+    def test_schedule_independent_of_strict(self):
+        """Schedule tier fires even when strict=False."""
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nquiet.com\n")
+        blocklist.apply(strict=False, _now_min=12 * 60)
+        self.assertIn("quiet.com", self._hosts_content())
+
+    def test_schedule_block_lifted_when_window_passes(self):
+        """Domains are unblocked automatically when the window ends."""
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
+        blocklist.apply(_now_min=12 * 60)           # inside window
+        self.assertIn("schedule.com", self._hosts_content())
+        blocklist._last_written = None              # simulate tick at a later time
+        blocklist.apply(_now_min=20 * 60)           # outside window
+        self.assertNotIn("schedule.com", self._hosts_content())
 
 
 # ---------------------------------------------------------------------------

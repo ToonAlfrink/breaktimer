@@ -564,9 +564,10 @@ def main():
         sys.exit(1)
 
     args = parse_arguments()
-    blocklist.blocklist_file = os.path.join(STATE_DIR, "blocklist.txt")
-    blocklist.blocklist_active_file = os.path.join(STATE_DIR, "blocklist-active.txt")
-    blocklist.blocklist_strict_file = os.path.join(STATE_DIR, "blocklist-strict.txt")
+    blocklist.blocklist_file          = os.path.join(STATE_DIR, "blocklist.txt")
+    blocklist.blocklist_active_file   = os.path.join(STATE_DIR, "blocklist-active.txt")
+    blocklist.blocklist_strict_file   = os.path.join(STATE_DIR, "blocklist-strict.txt")
+    blocklist.blocklist_schedule_file = os.path.join(STATE_DIR, "blocklist-schedule.txt")
     mana_max_seconds = args.deplete_minutes * SECONDS_PER_MINUTE
     mana_replenish_seconds = args.replenish_minutes * SECONDS_PER_MINUTE
 
