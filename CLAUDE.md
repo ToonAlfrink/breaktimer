@@ -30,7 +30,7 @@ this tool"); `test_main.py:TestUnconditionalLimit` pins that invariant.
 
 ## Architecture
 
-Two independent processes bridged by a live status file:
+Three independent processes bridged by a live status file:
 
 - `main.py` — the headless timer core (`TimerLoop`, `ActivityMonitor`, `TimerState`).
   No UI of its own; publishes a JSON snapshot every tick (including `refill_rate`,
@@ -40,6 +40,12 @@ Two independent processes bridged by a live status file:
   `gir1.2-gtklayershell-0.1`, `libgtk-layer-shell0`); reads the snapshot at 1 Hz,
   goes grey if the core stops publishing. One bar per monitor; responds to
   monitor-added/removed. Either process can restart without the other.
+- `web.py` — the HTTP status bridge. Reads the shared snapshot and serves it over
+  HTTP on port 8642: `GET /status` returns the live Snapshot as JSON; `GET /`
+  returns a mobile-friendly HTML mana bar that auto-refreshes every 2 s. Binds to
+  all interfaces so a phone on the LAN can open the page directly — the first leg
+  of the mobile companion. Independent process; either side can restart without the
+  other. `breaktimer url` prints the LAN URL for quick access.
 - `status.py` — the bridge. The `Snapshot` dataclass IS the cross-process contract:
   the core builds one each tick and calls `.publish()`; surfaces call `Snapshot.read()`,
   so neither side hard-codes payload keys. Transport is an atomic JSON write in
@@ -47,11 +53,12 @@ Two independent processes bridged by a live status file:
   `read()` defaults missing fields and drops unknown ones, so the two services can
   restart on either side of a schema change. Also holds the per-process singleton
   locks, shared colour palette, and time formatting.
-- `breaktimer` — CLI tool: `status`, `brightness off|on`, `restart`.
+- `breaktimer` — CLI tool: `status`, `url` (prints `http://<LAN-IP>:8642/` for the
+  mobile page), `brightness off|on`, `restart` (restarts all three services).
 - `brightness_control.py` — wraps `brightnessctl`/sysfs/ddcutil to set screen brightness.
 - `mouse_sensitivity_control.py` — rewrites COSMIC input config files to scale pointer speed.
 
-Runtime logs: `journalctl --user -u breaktimer-{core,ambient}.service`. The core
+Runtime logs: `journalctl --user -u breaktimer-{core,ambient,web}.service`. The core
 keeps a **why-it-acted trail** there via the `logging` module (`breaktimer.{core,
 brightness,mouse}` loggers): every consequential act — shutdown decision, grace
 entry/cancel, each brightness/pointer override with its cause, daily budget/limit
@@ -79,11 +86,12 @@ in `projects.yaml`).
 ```bash
 cd ~/Projects/breaktimer
 ./breaktimer status       # remaining time, today's history, fatigue state
-./breaktimer restart      # restart both systemd user services
+./breaktimer url          # print http://<LAN-IP>:8642/ — open on phone for mobile bar
+./breaktimer restart      # restart all three systemd user services
 ```
 
-Systemd services manage the processes: `breaktimer-core.service` and
-`breaktimer-ambient.service` (both `WantedBy=graphical-session.target`, `Restart=always`).
+Systemd services manage the processes: `breaktimer-core.service`,
+`breaktimer-ambient.service`, and `breaktimer-web.service` (all `Restart=always`).
 
 ## Quality gaps
 
