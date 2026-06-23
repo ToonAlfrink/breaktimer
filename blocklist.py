@@ -66,6 +66,10 @@ _WINDOW_RE = re.compile(r"^#\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*$")
 
 # Last block actually written — skip the filesystem round-trip when unchanged.
 _last_written: str | None = None
+# mtime_ns of /etc/hosts at the moment we last wrote it.  If it differs on the
+# next apply() call, an external process edited the file between ticks — log a
+# WARNING and force-rewrite so the block is restored.
+_last_written_mtime_ns: int | None = None
 # Suppress repeated write-failure warnings: log once, stay quiet.
 _write_failed = False
 
@@ -268,11 +272,14 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     _now_min:   minutes since midnight override (0–1439); for testing only.
                 Omit to use the current wall-clock time for schedule evaluation.
 
-    Called each adjustment tick from the timer core via the effects worker.
-    No-ops when the computed block matches what was last written. Logs each
-    real mutation with the domain count, active tiers, and domain names.
+    Called every tick (1 Hz) from the timer core via the effects worker.
+    No-ops when the computed block matches what was last written — unless the
+    file's mtime changed between calls, which means an external process tampered
+    with /etc/hosts; in that case a WARNING is logged and the block is restored
+    immediately. Logs each real mutation with the domain count, active tiers,
+    and domain names.
     """
-    global _last_written, _write_failed
+    global _last_written, _last_written_mtime_ns, _write_failed
 
     always_domains   = set(_read_file_domains(blocklist_file))
     active_domains   = set(_read_file_domains(blocklist_active_file)) if is_active else set()
@@ -283,7 +290,23 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     block = _block_lines(all_domains)
 
     if block == _last_written:
-        return  # nothing changed — skip the filesystem round-trip
+        # Content hasn't changed according to our records — but check whether an
+        # external process edited /etc/hosts since our last write.
+        if _last_written_mtime_ns is not None:
+            try:
+                current_mtime_ns = os.stat(HOSTS_PATH).st_mtime_ns
+            except OSError:
+                current_mtime_ns = None
+            if current_mtime_ns != _last_written_mtime_ns:
+                log.warning(
+                    "blocklist: %s was modified externally (mtime changed) — restoring block",
+                    HOSTS_PATH,
+                )
+                _last_written = None  # force rewrite below
+            else:
+                return  # nothing changed — skip the filesystem round-trip
+        else:
+            return
 
     hosts = _read_hosts()
     new_hosts = _splice(hosts, block)
@@ -302,6 +325,10 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
 
     _write_failed = False
     _last_written = block
+    try:
+        _last_written_mtime_ns = os.stat(HOSTS_PATH).st_mtime_ns
+    except OSError:
+        _last_written_mtime_ns = None
     if all_domains:
         tiers = []
         if always_domains:

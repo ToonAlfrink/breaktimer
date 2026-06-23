@@ -400,14 +400,18 @@ class TimerLoop:
             self.grace_start = None
         return False
     
-    def _apply_adjustments(self, remaining_fraction, current_loop_time):
+    def _apply_blocking(self):
+        """Dispatch domain/app blocking every tick (1 Hz) to close the tamper window."""
+        is_active = self.state.is_active
+        strict = self._refill_multiplier() <= 0
+        self._dispatch(lambda: blocklist.apply(is_active=is_active, strict=strict))
+        self._dispatch(lambda: app_blocking.apply(is_active=is_active, strict=strict))
+
+    def _apply_hardware_adjustments(self, remaining_fraction, current_loop_time):
+        """Dispatch slow hardware side effects (brightness, sensitivity) every 10 s."""
         if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
             self._dispatch(lambda: set_brightness_by_fraction(remaining_fraction))
             self._dispatch(lambda: set_sensitivity_by_fraction(remaining_fraction))
-            is_active = self.state.is_active
-            strict = self._refill_multiplier() <= 0
-            self._dispatch(lambda: blocklist.apply(is_active=is_active, strict=strict))
-            self._dispatch(lambda: app_blocking.apply(is_active=is_active, strict=strict))
             self.last_adjustment_time = current_loop_time
     
     def _grace_remaining(self):
@@ -491,7 +495,8 @@ class TimerLoop:
             return True
 
         remaining_fraction = self.state.remaining_time / self.mana_max_seconds
-        self._apply_adjustments(remaining_fraction, current_loop_time)
+        self._apply_blocking()
+        self._apply_hardware_adjustments(remaining_fraction, current_loop_time)
         self._check_notifications()
         self._write_status()
 

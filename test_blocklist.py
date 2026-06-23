@@ -65,8 +65,9 @@ class InTempDir(unittest.TestCase):
         blocklist.blocklist_active_file   = None
         blocklist.blocklist_strict_file   = None
         blocklist.blocklist_schedule_file = None
-        blocklist._last_written  = None
-        blocklist._write_failed  = False
+        blocklist._last_written          = None
+        blocklist._last_written_mtime_ns = None
+        blocklist._write_failed          = False
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -307,6 +308,51 @@ class TestApply(InTempDir):
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
             blocklist.apply()
         self.assertTrue(any("sinkholed" in m for m in cm.output))
+
+    def test_mtime_recorded_after_write(self):
+        """After a successful apply(), _last_written_mtime_ns must be set."""
+        _set_always(self.tmpdir, "example.com\n")
+        blocklist.apply()
+        self.assertIsNotNone(blocklist._last_written_mtime_ns)
+
+    def test_external_modification_triggers_warning_and_restore(self):
+        """If /etc/hosts mtime changes between apply() calls, log WARNING and rewrite."""
+        _set_always(self.tmpdir, "example.com\n")
+        blocklist.apply()
+        # Simulate external edit: touch the file to bump its mtime.
+        import time as _time
+        _time.sleep(0.01)  # ensure mtime changes on filesystems with coarse resolution
+        with open(self._hosts, "a") as f:
+            f.write("# external edit\n")
+        with self.assertLogs("breaktimer.blocklist", level="WARNING") as cm:
+            blocklist.apply()
+        self.assertTrue(any("modified externally" in m for m in cm.output))
+        # Block must be restored in the file.
+        with open(self._hosts) as f:
+            content = f.read()
+        self.assertIn("0.0.0.0 example.com", content)
+
+    def test_no_warning_when_mtime_unchanged(self):
+        """No tamper warning when mtime hasn't changed."""
+        _set_always(self.tmpdir, "example.com\n")
+        blocklist.apply()
+        # Second apply with same domains and unchanged mtime — must be silent.
+        with self.assertNoLogs("breaktimer.blocklist", level="WARNING"):
+            blocklist.apply()
+
+    def test_mtime_updated_after_tamper_restore(self):
+        """After a tamper-triggered rewrite, mtime is refreshed so next tick is quiet."""
+        _set_always(self.tmpdir, "example.com\n")
+        blocklist.apply()
+        import time as _time
+        _time.sleep(0.01)
+        with open(self._hosts, "a") as f:
+            f.write("# external edit\n")
+        with self.assertLogs("breaktimer.blocklist", level="WARNING"):
+            blocklist.apply()
+        # Now mtime is fresh; a third apply must not warn again.
+        with self.assertNoLogs("breaktimer.blocklist", level="WARNING"):
+            blocklist.apply()
 
 
 # ---------------------------------------------------------------------------
@@ -676,10 +722,14 @@ class TestScheduleTierApply(InTempDir):
 # ---------------------------------------------------------------------------
 
 class TestBlocklistIntegration(unittest.TestCase):
-    """apply() is dispatched via the effects worker with timer state baked in."""
+    """apply() is dispatched via the effects worker with timer state baked in.
 
-    def test_apply_dispatched_during_adjustments(self):
-        """_apply_adjustments must dispatch a blocklist effect with timer state."""
+    Blocking (_apply_blocking) runs every tick; hardware adjustments
+    (_apply_hardware_adjustments) run every 10 s — the two paths are separate.
+    """
+
+    def test_blocking_dispatched_every_tick(self):
+        """_apply_blocking must dispatch blocklist + app_blocking on every call."""
         import main
         from main import TimerState, TimerLoop
         import time
@@ -693,13 +743,12 @@ class TestBlocklistIntegration(unittest.TestCase):
 
         loop = TimerLoop(state, 0, monitor, 3600, 1200, 8 * 3600, 10 * 3600,
                          dispatch=dispatched.append)
-        loop.last_adjustment_time = time.monotonic() - 999
 
-        loop._apply_adjustments(1.0, time.monotonic())
+        loop._apply_blocking()
 
-        # Four effects: brightness, sensitivity, blocklist, app_blocking
-        self.assertEqual(len(dispatched), 4,
-                         "expected 4 dispatched effects: brightness, sensitivity, blocklist, app_blocking")
+        # Two effects: blocklist + app_blocking (no hardware effects here)
+        self.assertEqual(len(dispatched), 2,
+                         "expected 2 dispatched effects: blocklist, app_blocking")
 
     def test_blocklist_effect_calls_apply_with_timer_state(self):
         """The dispatched blocklist lambda must invoke blocklist.apply with is_active and strict."""
@@ -717,12 +766,11 @@ class TestBlocklistIntegration(unittest.TestCase):
 
         loop = TimerLoop(state, 0, monitor, 3600, 1200, 8 * 3600, 10 * 3600,
                          dispatch=dispatched.append)
-        loop.last_adjustment_time = time.monotonic() - 999
 
-        loop._apply_adjustments(1.0, time.monotonic())
+        loop._apply_blocking()
 
-        # Call the blocklist effect and verify it passes timer state to apply()
-        blocklist_effect = dispatched[2]
+        # Call the blocklist effect (first of two) and verify timer state forwarded
+        blocklist_effect = dispatched[0]
         with mock.patch.object(blocklist, "apply") as mock_apply:
             blocklist_effect()
         mock_apply.assert_called_once_with(is_active=True, strict=False)
@@ -745,11 +793,10 @@ class TestBlocklistIntegration(unittest.TestCase):
 
         loop = TimerLoop(state, 0, monitor, 3600, 1200, 8 * 3600, 10 * 3600,
                          dispatch=dispatched.append)
-        loop.last_adjustment_time = time.monotonic() - 999
 
-        loop._apply_adjustments(0.5, time.monotonic())
+        loop._apply_blocking()
 
-        blocklist_effect = dispatched[2]
+        blocklist_effect = dispatched[0]
         with mock.patch.object(blocklist, "apply") as mock_apply:
             blocklist_effect()
         _, kwargs = mock_apply.call_args

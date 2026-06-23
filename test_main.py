@@ -768,13 +768,40 @@ class TestDispatchDecoupling(unittest.TestCase):
         loop._check_monitor_health()
         self.assertEqual(len(seen), 1)
 
-    def test_adjustments_go_through_dispatch(self):
+    def test_hardware_adjustments_go_through_dispatch(self):
         seen = []
         loop = make_loop(3600)
         loop._dispatch = seen.append
         loop.last_adjustment_time = time.monotonic() - 999
-        loop._apply_adjustments(0.5, time.monotonic())
-        self.assertEqual(len(seen), 4)  # brightness + sensitivity + blocklist + app_blocking
+        loop._apply_hardware_adjustments(0.5, time.monotonic())
+        self.assertEqual(len(seen), 2)  # brightness + sensitivity
+
+    def test_blocking_adjustments_go_through_dispatch(self):
+        seen = []
+        loop = make_loop(3600)
+        loop._dispatch = seen.append
+        loop._apply_blocking()
+        self.assertEqual(len(seen), 2)  # blocklist + app_blocking
+
+    def test_hardware_adjustments_gated_at_10s(self):
+        """Hardware adjustments must be skipped when called within the 10s interval."""
+        seen = []
+        loop = make_loop(3600)
+        loop._dispatch = seen.append
+        # last_adjustment_time is recent — gate should suppress dispatch
+        loop.last_adjustment_time = time.monotonic()
+        loop._apply_hardware_adjustments(0.5, time.monotonic())
+        self.assertEqual(len(seen), 0, "hardware adjustments must be suppressed within 10s")
+
+    def test_blocking_runs_unconditionally(self):
+        """Blocking must dispatch on every call — it has no time gate."""
+        seen = []
+        loop = make_loop(3600)
+        loop._dispatch = seen.append
+        # Call twice in rapid succession — both must dispatch
+        loop._apply_blocking()
+        loop._apply_blocking()
+        self.assertEqual(len(seen), 4, "blocking must fire every tick, not just every 10s")
 
 
 class TestPhoneActivity(unittest.TestCase):
