@@ -58,12 +58,10 @@ def cmd_blocklist():
         return
     print(f"{len(domains)} domain(s) blocked via {blocklist.HOSTS_PATH}:")
     for d in domains:
-        bare = d if d.startswith("www.") else d
-        www = d if d.startswith("www.") else "www." + d
         if d.startswith("www."):
             print(f"  {d}  →  0.0.0.0")
         else:
-            print(f"  {bare}  +  {www}  →  0.0.0.0")
+            print(f"  {d}  +  www.{d}  →  0.0.0.0")
 
 
 def cmd_url(port=8642):
