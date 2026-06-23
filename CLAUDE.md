@@ -54,9 +54,20 @@ Three independent processes bridged by a live status file:
   restart on either side of a schema change. Also holds the per-process singleton
   locks, shared colour palette, and time formatting.
 - `breaktimer` — CLI tool: `status`, `url` (prints `http://<LAN-IP>:8642/` for the
-  mobile page), `brightness off|on`, `restart` (restarts all three services).
+  mobile page), `brightness off|on`, `blocklist` (shows all three blocking tiers with live
+  context), `restart` (restarts all three services).
 - `brightness_control.py` — wraps `brightnessctl`/sysfs/ddcutil to set screen brightness.
 - `mouse_sensitivity_control.py` — rewrites COSMIC input config files to scale pointer speed.
+- `blocklist.py` — sinkholes domains in `/etc/hosts` via three timer-state-aware tiers.
+  All files live in `STATE_DIR`; absent files are silently ignored. Applied every adjustment
+  tick; the core passes current `is_active` and `strict` (refill_rate≤0) flags so the union
+  of applicable domains is computed and written atomically:
+  - `blocklist.txt` — always blocked (permanent distractions: gambling, doom-scroll, etc.)
+  - `blocklist-active.txt` — blocked only while the timer is active (work-session
+    enforcement: distracting sites unavailable during a session, automatically unblocked
+    during breaks when the bar refills)
+  - `blocklist-strict.txt` — additionally blocked when daily refill is gone (day-is-over
+    enforcement: everything distraction-worthy locked down once the daily limit is hit)
 
 Runtime logs: `journalctl --user -u breaktimer-{core,ambient,web}.service`. The core
 keeps a **why-it-acted trail** there via the `logging` module (`breaktimer.{core,
@@ -71,7 +82,9 @@ arithmetic, refill fatigue, shutdown grace window, notifications, status publish
 the why-it-acted log trail, the unconditional-limit invariant); `test_status.py`
 covers the status bridge; `test_brightness_control.py` / `test_mouse_sensitivity_control.py`
 cover the screen/pointer overrides (and that each logs its cause once);
-`test_ambient.py` covers headless bar logic and the service files. Run before and
+`test_ambient.py` covers headless bar logic and the service files;
+`test_blocklist.py` covers the three-tier `/etc/hosts` blocking (read, splice,
+apply, tier activation, log trail, and the integration dispatch). Run before and
 after any change to the core:
 
 ```bash

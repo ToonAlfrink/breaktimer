@@ -403,7 +403,9 @@ class TimerLoop:
         if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
             self._dispatch(lambda: set_brightness_by_fraction(remaining_fraction))
             self._dispatch(lambda: set_sensitivity_by_fraction(remaining_fraction))
-            self._dispatch(blocklist.apply)
+            is_active = self.state.is_active
+            strict = self._refill_multiplier() <= 0
+            self._dispatch(lambda: blocklist.apply(is_active=is_active, strict=strict))
             self.last_adjustment_time = current_loop_time
     
     def _grace_remaining(self):
@@ -563,6 +565,8 @@ def main():
 
     args = parse_arguments()
     blocklist.blocklist_file = os.path.join(STATE_DIR, "blocklist.txt")
+    blocklist.blocklist_active_file = os.path.join(STATE_DIR, "blocklist-active.txt")
+    blocklist.blocklist_strict_file = os.path.join(STATE_DIR, "blocklist-strict.txt")
     mana_max_seconds = args.deplete_minutes * SECONDS_PER_MINUTE
     mana_replenish_seconds = args.replenish_minutes * SECONDS_PER_MINUTE
 

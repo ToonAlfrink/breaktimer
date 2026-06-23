@@ -51,17 +51,46 @@ def cmd_brightness_on():
 
 
 def cmd_blocklist():
-    blocklist.blocklist_file = os.path.join(_main.STATE_DIR, "blocklist.txt")
-    domains = blocklist.read_domains()
-    if not domains:
-        print(f"no domains blocked  (edit {blocklist.blocklist_file} to add some)")
+    state_dir = _main.STATE_DIR
+    blocklist.blocklist_file        = os.path.join(state_dir, "blocklist.txt")
+    blocklist.blocklist_active_file = os.path.join(state_dir, "blocklist-active.txt")
+    blocklist.blocklist_strict_file = os.path.join(state_dir, "blocklist-strict.txt")
+
+    snap = status.Snapshot.read(max_age_seconds=10)
+    is_active = snap.is_active if snap else False
+    strict    = (snap.refill_rate <= 0) if snap else False
+
+    def _fmt(domains):
+        lines = []
+        for d in domains:
+            if d.startswith("www."):
+                lines.append(f"    {d}  →  0.0.0.0")
+            else:
+                lines.append(f"    {d}  +  www.{d}  →  0.0.0.0")
+        return lines
+
+    always  = blocklist.read_domains()
+    active  = blocklist.read_domains_active()
+    strict_ = blocklist.read_domains_strict()
+
+    if not (always or active or strict_):
+        print(f"no domains blocked")
+        print(f"  always:  {blocklist.blocklist_file}")
+        print(f"  active:  {blocklist.blocklist_active_file}  (blocked during work sessions)")
+        print(f"  strict:  {blocklist.blocklist_strict_file}  (blocked when daily refill is gone)")
         return
-    print(f"{len(domains)} domain(s) blocked via {blocklist.HOSTS_PATH}:")
-    for d in domains:
-        if d.startswith("www."):
-            print(f"  {d}  →  0.0.0.0")
-        else:
-            print(f"  {d}  +  www.{d}  →  0.0.0.0")
+
+    if always:
+        print(f"always blocked ({len(always)}):")
+        print("\n".join(_fmt(always)))
+    if active:
+        tag = "● active now" if is_active else "○ inactive (break)"
+        print(f"work-session blocked ({len(active)}) [{tag}]:")
+        print("\n".join(_fmt(active)))
+    if strict_:
+        tag = "● enforced" if strict else "○ not yet (refill still available)"
+        print(f"strict/day-limit blocked ({len(strict_)}) [{tag}]:")
+        print("\n".join(_fmt(strict_)))
 
 
 def cmd_url(port=8642):

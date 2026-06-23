@@ -1,8 +1,17 @@
-"""Domain blocklist: sinkhole a configurable set of domains to 0.0.0.0 in /etc/hosts.
+"""Domain blocklist: sinkhole configurable sets of domains to 0.0.0.0 in /etc/hosts.
 
-The owner places one domain per line in STATE_DIR/blocklist.txt (bare hostnames,
-no 'www.' prefix needed — the module adds both bare and www. variants).  The
-core calls apply() each adjustment tick; the module rewrites the /etc/hosts
+Three independent tiers, each backed by an owner-edited file in STATE_DIR:
+
+  blocklist.txt        — always blocked (permanent distractions; gambling, news, etc.)
+  blocklist-active.txt — blocked only while the timer is active (work-session enforcement:
+                         sites unavailable during a work session, accessible again on a
+                         break when the bar is refilling)
+  blocklist-strict.txt — additionally blocked when daily refill is gone (day is over;
+                         enforces shutdown once the limit is reached)
+
+The owner places one domain per line in each file (bare hostnames, no 'www.' prefix
+needed — the module adds both bare and www. variants). The core calls
+apply(is_active, strict) each adjustment tick; the module rewrites the /etc/hosts
 block atomically only when the content has changed, and logs every mutation via
 the why-it-acted trail.
 
@@ -11,14 +20,14 @@ The /etc/hosts block is demarcated by:
     ...
     # END breaktimer-blocklist
 
-Everything outside that region is preserved untouched.  If the markers are
-absent the block is appended.  If blocklist.txt is missing or empty the block
-is removed.
+Everything outside that region is preserved untouched. If the markers are absent
+the block is appended. If all applicable files are missing or empty the block is
+removed.
 
 Writing /etc/hosts requires the file to be writable by the running user.
 The core service must declare ReadWritePaths=/etc/hosts and /etc/hosts must
 be user- or group-writable (e.g. chown user /etc/hosts, or add the user to a
-group that owns /etc/hosts).  When the write fails, the module logs a warning
+group that owns /etc/hosts). When the write fails, the module logs a warning
 once and stays quiet until the next successful write.
 """
 import logging
@@ -33,7 +42,9 @@ _BLOCK_BEGIN = "# BEGIN breaktimer-blocklist"
 _BLOCK_END = "# END breaktimer-blocklist"
 
 # Set by the core after it resolves STATE_DIR, so this module has no circular dep.
-blocklist_file: str | None = None
+blocklist_file: str | None = None         # always-blocked tier
+blocklist_active_file: str | None = None  # work-session tier (blocked while timer active)
+blocklist_strict_file: str | None = None  # strict tier (blocked when daily refill is gone)
 
 # Last block actually written — skip the filesystem round-trip when unchanged.
 _last_written: str | None = None
@@ -41,16 +52,15 @@ _last_written: str | None = None
 _write_failed = False
 
 
-def read_domains() -> list[str]:
-    """Return the owner-configured domains from blocklist.txt (deduplicated, sorted).
+def _read_file_domains(path: str | None) -> list[str]:
+    """Return domains from a single file (deduplicated, sorted).
 
-    Returns an empty list if the file is missing or blank — the block is then
-    removed from /etc/hosts rather than leaving stale sinkhole entries.
+    Returns an empty list if path is None, missing, or blank.
     """
-    if not blocklist_file:
+    if not path:
         return []
     try:
-        with open(blocklist_file) as f:
+        with open(path) as f:
             lines = f.readlines()
     except OSError:
         return []
@@ -65,6 +75,24 @@ def read_domains() -> list[str]:
                 seen.add(d)
                 domains.append(d)
     return sorted(domains)
+
+
+def read_domains() -> list[str]:
+    """Return always-blocked domains from blocklist.txt (deduplicated, sorted).
+
+    Returns an empty list if the file is missing or blank.
+    """
+    return _read_file_domains(blocklist_file)
+
+
+def read_domains_active() -> list[str]:
+    """Return work-session domains from blocklist-active.txt (deduplicated, sorted)."""
+    return _read_file_domains(blocklist_active_file)
+
+
+def read_domains_strict() -> list[str]:
+    """Return strict-tier domains from blocklist-strict.txt (deduplicated, sorted)."""
+    return _read_file_domains(blocklist_strict_file)
 
 
 def _block_lines(domains: list[str]) -> str:
@@ -95,7 +123,7 @@ def _splice(hosts_text: str, block: str) -> str:
     """Replace or insert the breaktimer block in the /etc/hosts text.
 
     If block is empty (no domains), remove any existing markers and the lines
-    between them.  If non-empty, replace the existing markers or append.
+    between them. If non-empty, replace the existing markers or append.
     """
     pattern = re.compile(
         r"^# BEGIN breaktimer-blocklist\n.*?^# END breaktimer-blocklist\n?",
@@ -143,17 +171,24 @@ def _write_hosts(content: str) -> Exception | None:
         return e
 
 
-def apply() -> None:
-    """Sync /etc/hosts with the current blocklist.txt.
+def apply(is_active: bool = False, strict: bool = False) -> None:
+    """Sync /etc/hosts with the union of applicable tier lists.
+
+    is_active: include blocklist-active.txt (work-session enforcement)
+    strict:    include blocklist-strict.txt (day-is-over enforcement)
 
     Called each adjustment tick from the timer core via the effects worker.
-    No-ops when the computed block matches what was last written.  Logs each
-    real mutation with the domain count and names.
+    No-ops when the computed block matches what was last written. Logs each
+    real mutation with the domain count, active tiers, and domain names.
     """
     global _last_written, _write_failed
 
-    domains = read_domains()
-    block = _block_lines(domains)
+    always_domains = set(_read_file_domains(blocklist_file))
+    active_domains = set(_read_file_domains(blocklist_active_file)) if is_active else set()
+    strict_domains = set(_read_file_domains(blocklist_strict_file)) if strict else set()
+
+    all_domains = sorted(always_domains | active_domains | strict_domains)
+    block = _block_lines(all_domains)
 
     if block == _last_written:
         return  # nothing changed — skip the filesystem round-trip
@@ -175,13 +210,23 @@ def apply() -> None:
 
     _write_failed = False
     _last_written = block
-    if domains:
+    if all_domains:
+        tiers = []
+        if always_domains:
+            tiers.append(f"always:{len(always_domains)}")
+        if is_active and active_domains:
+            tiers.append(f"active:{len(active_domains)}")
+        if strict and strict_domains:
+            tiers.append(f"strict:{len(strict_domains)}")
         log.info(
-            "blocklist: sinkholed %d domain(s) in %s: %s",
-            len(domains), HOSTS_PATH, ", ".join(domains),
+            "blocklist: sinkholed %d domain(s) [%s] in %s: %s",
+            len(all_domains),
+            " ".join(tiers) if tiers else "none",
+            HOSTS_PATH,
+            ", ".join(all_domains),
         )
     else:
         log.info(
-            "blocklist: removed sinkhole block from %s (blocklist.txt empty or absent)",
+            "blocklist: removed sinkhole block from %s (all tier files empty or absent)",
             HOSTS_PATH,
         )
