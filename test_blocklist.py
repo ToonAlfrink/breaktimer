@@ -697,9 +697,9 @@ class TestBlocklistIntegration(unittest.TestCase):
 
         loop._apply_adjustments(1.0, time.monotonic())
 
-        # Three effects: brightness, sensitivity, blocklist
-        self.assertEqual(len(dispatched), 3,
-                         "expected 3 dispatched effects: brightness, sensitivity, blocklist")
+        # Four effects: brightness, sensitivity, blocklist, app_blocking
+        self.assertEqual(len(dispatched), 4,
+                         "expected 4 dispatched effects: brightness, sensitivity, blocklist, app_blocking")
 
     def test_blocklist_effect_calls_apply_with_timer_state(self):
         """The dispatched blocklist lambda must invoke blocklist.apply with is_active and strict."""

@@ -774,7 +774,7 @@ class TestDispatchDecoupling(unittest.TestCase):
         loop._dispatch = seen.append
         loop.last_adjustment_time = time.monotonic() - 999
         loop._apply_adjustments(0.5, time.monotonic())
-        self.assertEqual(len(seen), 3)  # brightness + sensitivity + blocklist
+        self.assertEqual(len(seen), 4)  # brightness + sensitivity + blocklist + app_blocking
 
 
 class TestPhoneActivity(unittest.TestCase):

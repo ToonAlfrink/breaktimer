@@ -16,6 +16,7 @@ import os
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import app_blocking
 import blocklist
 import brightness_control
 import main as _main
@@ -56,12 +57,16 @@ def cmd_blocklist():
     blocklist.blocklist_active_file   = os.path.join(state_dir, "blocklist-active.txt")
     blocklist.blocklist_strict_file   = os.path.join(state_dir, "blocklist-strict.txt")
     blocklist.blocklist_schedule_file = os.path.join(state_dir, "blocklist-schedule.txt")
+    app_blocking.app_blocklist_file          = os.path.join(state_dir, "blocklist-apps.txt")
+    app_blocking.app_blocklist_active_file   = os.path.join(state_dir, "blocklist-apps-active.txt")
+    app_blocking.app_blocklist_strict_file   = os.path.join(state_dir, "blocklist-apps-strict.txt")
+    app_blocking.app_blocklist_schedule_file = os.path.join(state_dir, "blocklist-apps-schedule.txt")
 
     snap = status.Snapshot.read(max_age_seconds=10)
     is_active = snap.is_active if snap else False
     strict    = (snap.refill_rate <= 0) if snap else False
 
-    def _fmt(domains):
+    def _fmt_domains(domains):
         lines = []
         for d in domains:
             if d.startswith("www."):
@@ -70,33 +75,62 @@ def cmd_blocklist():
                 lines.append(f"    {d}  +  www.{d}  →  0.0.0.0")
         return lines
 
+    def _fmt_apps(names):
+        return [f"    {n}  →  SIGTERM" for n in names]
+
     always   = blocklist.read_domains()
     active   = blocklist.read_domains_active()
     strict_  = blocklist.read_domains_strict()
     schedule = blocklist.read_domains_schedule()
 
-    if not (always or active or strict_ or schedule):
-        print("no domains blocked")
-        print(f"  always:   {blocklist.blocklist_file}")
-        print(f"  active:   {blocklist.blocklist_active_file}  (blocked during work sessions)")
-        print(f"  strict:   {blocklist.blocklist_strict_file}  (blocked when daily refill is gone)")
-        print(f"  schedule: {blocklist.blocklist_schedule_file}  (blocked during time windows)")
+    apps_always   = app_blocking.read_names()
+    apps_active   = app_blocking.read_names_active()
+    apps_strict   = app_blocking.read_names_strict()
+    apps_schedule = app_blocking.read_names_schedule()
+
+    nothing = not (always or active or strict_ or schedule or
+                   apps_always or apps_active or apps_strict or apps_schedule)
+    if nothing:
+        print("no domains or apps blocked")
+        print(f"  domains always:   {blocklist.blocklist_file}")
+        print(f"  domains active:   {blocklist.blocklist_active_file}  (blocked during work sessions)")
+        print(f"  domains strict:   {blocklist.blocklist_strict_file}  (blocked when daily refill is gone)")
+        print(f"  domains schedule: {blocklist.blocklist_schedule_file}  (blocked during time windows)")
+        print(f"  apps always:      {app_blocking.app_blocklist_file}")
+        print(f"  apps active:      {app_blocking.app_blocklist_active_file}  (killed during work sessions)")
+        print(f"  apps strict:      {app_blocking.app_blocklist_strict_file}  (killed when daily refill is gone)")
+        print(f"  apps schedule:    {app_blocking.app_blocklist_schedule_file}  (killed during time windows)")
         return
 
     if always:
-        print(f"always blocked ({len(always)}):")
-        print("\n".join(_fmt(always)))
+        print(f"always blocked domains ({len(always)}):")
+        print("\n".join(_fmt_domains(always)))
     if active:
         tag = "● active now" if is_active else "○ inactive (break)"
-        print(f"work-session blocked ({len(active)}) [{tag}]:")
-        print("\n".join(_fmt(active)))
+        print(f"work-session blocked domains ({len(active)}) [{tag}]:")
+        print("\n".join(_fmt_domains(active)))
     if strict_:
         tag = "● enforced" if strict else "○ not yet (refill still available)"
-        print(f"strict/day-limit blocked ({len(strict_)}) [{tag}]:")
-        print("\n".join(_fmt(strict_)))
+        print(f"strict/day-limit blocked domains ({len(strict_)}) [{tag}]:")
+        print("\n".join(_fmt_domains(strict_)))
     if schedule:
-        print(f"schedule blocked ({len(schedule)}) [● window active now]:")
-        print("\n".join(_fmt(schedule)))
+        print(f"schedule blocked domains ({len(schedule)}) [● window active now]:")
+        print("\n".join(_fmt_domains(schedule)))
+
+    if apps_always:
+        print(f"always blocked apps ({len(apps_always)}):")
+        print("\n".join(_fmt_apps(apps_always)))
+    if apps_active:
+        tag = "● active now" if is_active else "○ inactive (break)"
+        print(f"work-session blocked apps ({len(apps_active)}) [{tag}]:")
+        print("\n".join(_fmt_apps(apps_active)))
+    if apps_strict:
+        tag = "● enforced" if strict else "○ not yet (refill still available)"
+        print(f"strict/day-limit blocked apps ({len(apps_strict)}) [{tag}]:")
+        print("\n".join(_fmt_apps(apps_strict)))
+    if apps_schedule:
+        print(f"schedule blocked apps ({len(apps_schedule)}) [● window active now]:")
+        print("\n".join(_fmt_apps(apps_schedule)))
 
 
 def cmd_url(port=8642):
