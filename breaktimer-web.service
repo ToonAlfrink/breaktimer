@@ -1,0 +1,15 @@
+[Unit]
+Description=breaktimer web — HTTP status bridge for mobile companion
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/python3 /home/user/Projects/breaktimer/web.py
+WorkingDirectory=/home/user/Projects/breaktimer
+Restart=always
+RestartSec=2
+PrivateTmp=true
+ProtectSystem=strict
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
