@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 import status
 from status import SECONDS_PER_MINUTE, today_str
+import blocklist
 from brightness_control import set_brightness_by_fraction, start_external_display_detection
 from mouse_sensitivity_control import set_sensitivity_by_fraction, read_original_sensitivity, restore_sensitivity
 
@@ -402,6 +403,7 @@ class TimerLoop:
         if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
             self._dispatch(lambda: set_brightness_by_fraction(remaining_fraction))
             self._dispatch(lambda: set_sensitivity_by_fraction(remaining_fraction))
+            self._dispatch(blocklist.apply)
             self.last_adjustment_time = current_loop_time
     
     def _grace_remaining(self):
@@ -560,6 +562,7 @@ def main():
         sys.exit(1)
 
     args = parse_arguments()
+    blocklist.blocklist_file = os.path.join(STATE_DIR, "blocklist.txt")
     mana_max_seconds = args.deplete_minutes * SECONDS_PER_MINUTE
     mana_replenish_seconds = args.replenish_minutes * SECONDS_PER_MINUTE
 

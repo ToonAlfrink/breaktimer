@@ -9,6 +9,7 @@ Restart=always
 RestartSec=5
 PrivateTmp=true
 ProtectSystem=strict
+ReadWritePaths=/etc/hosts
 NoNewPrivileges=true
 
 [Install]

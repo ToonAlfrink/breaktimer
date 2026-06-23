@@ -6,6 +6,7 @@ Commands:
   url                      print the mobile status page URL (http://<LAN-IP>:8642/)
   brightness off [N] [P]   stop dimming for N minutes (default: 120), park displays at P% (default: 100)
   brightness on            resume automatic dimming
+  blocklist                print the active domain blocklist (from STATE_DIR/blocklist.txt)
   restart                  restart all three systemd user services
 """
 import socket
@@ -15,7 +16,9 @@ import os
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import blocklist
 import brightness_control
+import main as _main
 import status
 
 
@@ -45,6 +48,22 @@ def cmd_brightness_off(minutes=120.0, percent=100):
 def cmd_brightness_on():
     brightness_control.unpause()
     print("brightness control back on")
+
+
+def cmd_blocklist():
+    blocklist.blocklist_file = os.path.join(_main.STATE_DIR, "blocklist.txt")
+    domains = blocklist.read_domains()
+    if not domains:
+        print(f"no domains blocked  (edit {blocklist.blocklist_file} to add some)")
+        return
+    print(f"{len(domains)} domain(s) blocked via {blocklist.HOSTS_PATH}:")
+    for d in domains:
+        bare = d if d.startswith("www.") else d
+        www = d if d.startswith("www.") else "www." + d
+        if d.startswith("www."):
+            print(f"  {d}  →  0.0.0.0")
+        else:
+            print(f"  {bare}  +  {www}  →  0.0.0.0")
 
 
 def cmd_url(port=8642):
@@ -80,6 +99,8 @@ elif argv[0] == "brightness" and len(argv) > 1 and argv[1] == "off":
     )
 elif argv[0] == "brightness" and len(argv) > 1 and argv[1] == "on":
     cmd_brightness_on()
+elif argv[0] == "blocklist":
+    cmd_blocklist()
 elif argv[0] == "restart":
     cmd_restart()
 else:
