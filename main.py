@@ -23,6 +23,12 @@ log = logging.getLogger("breaktimer.core")
 
 _HISTORY_DAYS = 400  # covers 12-month sparkline + buffer
 
+# Phone pings arrive every 2 s while the mobile page is foregrounded.  A ping
+# older than this is treated as gone — the phone was backgrounded or the page
+# closed.  Generous enough to absorb a missed poll or two, tight enough that
+# leaving the phone open on a desk overnight never counts as work.
+PHONE_PING_MAX_AGE_SECONDS = 10
+
 
 def _prune_daily_work_totals(totals):
     """Drop entries older than _HISTORY_DAYS to keep the dict bounded."""
@@ -299,6 +305,17 @@ class TimerLoop:
         """Fire a desktop notification off the timer thread."""
         self._dispatch(lambda: _notify(body, urgency=urgency))
 
+    def _check_phone_activity(self):
+        """If the mobile page sent a recent ping, mark activity as if keyboard fired.
+
+        Symmetric to libinput: the ping feeds set_last_activity_time so the
+        timer sees no difference between laptop input and phone browsing.
+        A ping older than PHONE_PING_MAX_AGE_SECONDS is ignored — the page was
+        backgrounded or the connection dropped; phone use has stopped."""
+        last_ping = status.read_phone_ping()
+        if last_ping is not None and time.time() - last_ping < PHONE_PING_MAX_AGE_SECONDS:
+            self.activity_monitor.set_last_activity_time(time.monotonic())
+
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
         if not self.activity_monitor.is_healthy():
             # Can't see input — conservatively treat as active so the bar drains.
@@ -457,6 +474,7 @@ class TimerLoop:
         current_loop_time = time.monotonic()
         time_since_last_loop = current_loop_time - self.last_loop_time
 
+        self._check_phone_activity()
         self._update_activity_status(current_loop_time, time_since_last_loop)
         self._check_monitor_health()
         # Meter at most one bounded step, even if the raw gap was longer (the

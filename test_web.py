@@ -3,10 +3,14 @@ import configparser
 import http.client
 import json
 import os
+import shutil
+import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
+import status
 from status import Snapshot
 from web import _Handler, _Server
 
@@ -92,6 +96,74 @@ class TestWebServer(unittest.TestCase):
             _, body = self._get("/status")
         data = json.loads(body)
         self.assertIsNone(data["grace_remaining"])
+
+
+class TestPhonePing(unittest.TestCase):
+    """POST /ping records phone activity; staleness and unknown paths handled."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = _Server(("127.0.0.1", 0), _Handler)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.patcher = mock.patch("status._runtime_dir", return_value=self.tmpdir)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _post(self, path, body=b""):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("POST", path, body, {"Content-Length": str(len(body))})
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        return resp
+
+    def test_ping_returns_204(self):
+        resp = self._post("/ping")
+        self.assertEqual(resp.status, 204)
+
+    def test_ping_writes_activity_file(self):
+        self._post("/ping")
+        ts = status.read_phone_ping()
+        self.assertIsNotNone(ts, "ping file should be written")
+
+    def test_ping_timestamp_is_recent(self):
+        before = time.time()
+        self._post("/ping")
+        after = time.time()
+        ts = status.read_phone_ping()
+        self.assertGreaterEqual(ts, before - 1)
+        self.assertLessEqual(ts, after + 1)
+
+    def test_unknown_post_returns_404(self):
+        resp = self._post("/not-a-thing")
+        self.assertEqual(resp.status, 404)
+
+    def test_ping_with_body_is_accepted(self):
+        # fetch() sends no body; other clients might send a small JSON blob — accept it
+        resp = self._post("/ping", b'{"t": 1}')
+        self.assertEqual(resp.status, 204)
+
+    def test_html_contains_ping_script(self):
+        # Regression: the mobile page must include the ping JS so phone use drains mana
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        body = resp.read().decode()
+        conn.close()
+        self.assertIn("/ping", body)
+        self.assertIn("visibilitychange", body)
 
 
 def _load_service(filename):

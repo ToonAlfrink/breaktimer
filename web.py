@@ -125,6 +125,22 @@ async function poll() {
 }
 poll();
 setInterval(poll, 2000);
+
+// Phone activity ping — while this page is foregrounded, phone use drains
+// the shared mana bar exactly like laptop keyboard/mouse input.
+let _pingTimer = null;
+function _ping() {
+  fetch('/ping', {method: 'POST', cache: 'no-store'}).catch(() => {});
+}
+function _startPing() {
+  if (!_pingTimer) { _ping(); _pingTimer = setInterval(_ping, 2000); }
+}
+function _stopPing() { clearInterval(_pingTimer); _pingTimer = null; }
+document.addEventListener('visibilitychange',
+  () => document.visibilityState === 'visible' ? _startPing() : _stopPing());
+document.addEventListener('touchstart', _ping, {passive: true});
+document.addEventListener('scroll',     _ping, {passive: true});
+if (document.visibilityState === 'visible') _startPing();
 </script>
 </body>
 </html>"""
@@ -142,6 +158,25 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/ping":
+            self._handle_ping()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _handle_ping(self):
+        # Drain any request body before replying (fetch() sends none, but be safe).
+        n = int(self.headers.get("Content-Length", 0))
+        if n:
+            self.rfile.read(n)
+        try:
+            status.write_phone_ping()
+        except OSError as e:
+            log.warning("phone ping write failed: %s", e)
+        self.send_response(204)
+        self.end_headers()
 
     def _serve_status(self):
         snap = status.Snapshot.read(max_age_seconds=5)

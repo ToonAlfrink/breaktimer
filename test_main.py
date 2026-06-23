@@ -777,5 +777,95 @@ class TestDispatchDecoupling(unittest.TestCase):
         self.assertEqual(len(seen), 2)  # brightness + sensitivity
 
 
+class TestPhoneActivity(unittest.TestCase):
+    """Phone pings feed the same ActivityMonitor hook as libinput input."""
+
+    def _loop_with_monitor(self, remaining=3600, replenish_seconds=1200):
+        monitor = StubMonitor(healthy=True)
+        # Start with last activity far in the past so the loop defaults to idle
+        monitor.set_last_activity_time(time.monotonic() - 9999)
+        state = TimerState(remaining_time=remaining)
+        loop = TimerLoop(state, 0, monitor, 3600, replenish_seconds, 8 * 3600, 10 * 3600)
+        return loop, monitor
+
+    def _with_ping(self, tmpdir, age_seconds=0):
+        """Write a ping file with a given age in seconds."""
+        import shutil
+        import status as st
+        with mock.patch("status._runtime_dir", return_value=tmpdir):
+            st.write_phone_ping()
+        if age_seconds:
+            # Back-date the file's last_ping field
+            path = os.path.join(tmpdir, "breaktimer-phone-activity.json")
+            with open(path) as f:
+                data = json.load(f)
+            data["last_ping"] -= age_seconds
+            with open(path, "w") as f:
+                json.dump(data, f)
+
+    def test_recent_ping_marks_monitor_active(self):
+        loop, monitor = self._loop_with_monitor()
+        before = time.monotonic()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch("status._runtime_dir", return_value=tmpdir):
+            self._with_ping(tmpdir)
+            loop._check_phone_activity()
+        self.assertGreaterEqual(monitor.get_last_activity_time(), before)
+
+    def test_stale_ping_does_not_update_monitor(self):
+        loop, monitor = self._loop_with_monitor()
+        old_activity = monitor.get_last_activity_time()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch("status._runtime_dir", return_value=tmpdir):
+            self._with_ping(tmpdir, age_seconds=main.PHONE_PING_MAX_AGE_SECONDS + 1)
+            loop._check_phone_activity()
+        self.assertAlmostEqual(monitor.get_last_activity_time(), old_activity, places=3)
+
+    def test_missing_ping_file_is_ignored(self):
+        loop, monitor = self._loop_with_monitor()
+        old_activity = monitor.get_last_activity_time()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch("status._runtime_dir", return_value=tmpdir):
+            # No ping file written
+            loop._check_phone_activity()
+        self.assertAlmostEqual(monitor.get_last_activity_time(), old_activity, places=3)
+
+    def test_corrupt_ping_file_is_ignored(self):
+        loop, monitor = self._loop_with_monitor()
+        old_activity = monitor.get_last_activity_time()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch("status._runtime_dir", return_value=tmpdir):
+            path = os.path.join(tmpdir, "breaktimer-phone-activity.json")
+            with open(path, "w") as f:
+                f.write("{broken json")
+            loop._check_phone_activity()
+        self.assertAlmostEqual(monitor.get_last_activity_time(), old_activity, places=3)
+
+    def test_phone_ping_drains_mana_on_tick(self):
+        """A fresh ping causes the tick to meter time (phone use is real work)."""
+        loop, monitor = self._loop_with_monitor()
+        start = loop.state.remaining_time
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch("status._runtime_dir", return_value=tmpdir), \
+                mock.patch("status.Snapshot.publish"), \
+                mock.patch("main.save_state_to_file"):
+            self._with_ping(tmpdir)
+            loop.tick()
+        self.assertLess(loop.state.remaining_time, start,
+                        "active tick should have drained the bar")
+
+    def test_no_ping_refills_mana_on_tick(self):
+        """Without a ping (and no local input), the tick refills instead of draining."""
+        loop, monitor = self._loop_with_monitor(remaining=1800)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch("status._runtime_dir", return_value=tmpdir), \
+                mock.patch("status.Snapshot.publish"), \
+                mock.patch("main.save_state_to_file"):
+            # No ping file — phone is backgrounded; monitor also has stale activity
+            loop.tick()
+        self.assertGreater(loop.state.remaining_time, 1800,
+                           "idle tick should have refilled the bar")
+
+
 if __name__ == "__main__":
     unittest.main()

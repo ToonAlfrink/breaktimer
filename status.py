@@ -89,6 +89,31 @@ def brightness_pause_path():
     return os.path.join(_runtime_dir(), "breaktimer-brightness-pause")
 
 
+def phone_activity_path():
+    return os.path.join(_runtime_dir(), "breaktimer-phone-activity.json")
+
+
+def write_phone_ping():
+    """Atomically record the current wall-clock time as a phone activity ping."""
+    path = phone_activity_path()
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"last_ping": time.time()}, f)
+    os.replace(tmp, path)
+
+
+def read_phone_ping():
+    """Return wall-clock timestamp of the last phone ping, or None if missing/corrupt."""
+    try:
+        with open(phone_activity_path()) as f:
+            data = json.load(f)
+        ts = data.get("last_ping")
+        return float(ts) if ts is not None else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def acquire_singleton_lock(name):
     """Take an exclusive runtime lock for this process's lifetime.
 
