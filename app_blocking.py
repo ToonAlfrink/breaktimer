@@ -15,9 +15,10 @@ File format: one process name per line (bare names, no path). Names are matched
 case-insensitively and exactly (whole process name via pgrep -ix). The owner lists
 the name that appears in `ps` / `pgrep` output, e.g. "steam", "discord", "firefox".
 
-apply(is_active, strict) is called every tick (1 Hz) from the timer core. It is
-idempotent — once a process is dead, pgrep finds nothing and the call is a no-op.
-Each kill is logged with process name, PID, and the tier that triggered it
+apply(is_active, strict) is called every tick (1 Hz) from the timer core. Signal
+escalation: SIGTERM is sent on first contact (lets the app save state); if the
+process is still alive after SIGKILL_DELAY_TICKS apply() calls, SIGKILL is sent.
+Each signal is logged with process name, PID, and the tier that triggered it
 (why-it-acted trail). Processes owned by other users are silently skipped
 (PermissionError from os.kill).
 """
@@ -35,6 +36,15 @@ app_blocklist_file: str | None = None           # always-blocked tier
 app_blocklist_active_file: str | None = None    # work-session tier
 app_blocklist_strict_file: str | None = None    # strict tier
 app_blocklist_schedule_file: str | None = None  # schedule tier
+
+# Signal escalation: SIGTERM on first contact, SIGKILL if the process is still
+# alive after this many apply() calls.  At 1 Hz that equals 5 seconds.
+SIGKILL_DELAY_TICKS: int = 5
+
+# pid → _apply_count value when SIGTERM was first delivered.
+_sigterm_tick: dict[int, int] = {}
+# Monotonic apply() call counter (never resets between ticks; tests reset it).
+_apply_count: int = 0
 
 
 def _find_pids(name: str) -> list[int]:
@@ -55,10 +65,10 @@ def _find_pids(name: str) -> list[int]:
     return []
 
 
-def _kill(pid: int) -> bool:
-    """Send SIGTERM to pid. Returns True if delivered, False if gone or denied."""
+def _send_signal(pid: int, sig: signal.Signals) -> bool:
+    """Deliver sig to pid.  Returns True if delivered, False if gone or denied."""
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.kill(pid, sig)
         return True
     except (ProcessLookupError, PermissionError):
         return False
@@ -71,9 +81,14 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     strict:     include blocklist-apps-strict.txt (day-is-over enforcement)
     _now_min:   minutes-since-midnight override (0–1439); for testing only.
 
-    Each killed process is logged with name, PID, and which tier(s) triggered
-    it. Processes belonging to other users are silently skipped.
+    Signal escalation: SIGTERM on first contact (gives the app a chance to save
+    state); SIGKILL after SIGKILL_DELAY_TICKS apply() calls if the process is
+    still alive.  Each signal is logged with name, PID, and triggering tier(s).
+    Processes belonging to other users are silently skipped.
     """
+    global _apply_count
+    _apply_count += 1
+
     always_names   = set(status.read_items(app_blocklist_file))
     active_names   = set(status.read_items(app_blocklist_active_file)) if is_active else set()
     strict_names   = set(status.read_items(app_blocklist_strict_file)) if strict else set()
@@ -90,10 +105,26 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     for name in schedule_names:
         tier_map.setdefault(name, []).append("schedule")
 
+    in_scope: set[int] = set()
     for name, tiers in sorted(tier_map.items()):
+        tier_label = "+".join(tiers)
         for pid in _find_pids(name):
-            if _kill(pid):
-                log.info(
-                    "app-block: killed %s (pid %d) [%s]",
-                    name, pid, "+".join(tiers),
-                )
+            in_scope.add(pid)
+            if pid not in _sigterm_tick:
+                if _send_signal(pid, signal.SIGTERM):
+                    _sigterm_tick[pid] = _apply_count
+                    log.info("app-block: SIGTERM %s (pid %d) [%s]", name, pid, tier_label)
+            elif _apply_count - _sigterm_tick[pid] >= SIGKILL_DELAY_TICKS:
+                if _send_signal(pid, signal.SIGKILL):
+                    log.info(
+                        "app-block: SIGKILL %s (pid %d) [%s] (survived SIGTERM)",
+                        name, pid, tier_label,
+                    )
+                # Whether SIGKILL was delivered or not, clear pending state so the
+                # next tick starts a fresh SIGTERM cycle (handles zombie edge case).
+                _sigterm_tick.pop(pid, None)
+
+    # Forget PIDs no longer in scope (tier deactivated, process already gone, etc.)
+    for pid in list(_sigterm_tick):
+        if pid not in in_scope:
+            del _sigterm_tick[pid]
