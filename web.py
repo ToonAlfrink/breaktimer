@@ -23,9 +23,9 @@ import status
 log = logging.getLogger("breaktimer.web")
 
 
-# Mobile-friendly status page.  Color stops mirror status.COLOR_STOPS so the
-# phone bar matches the ambient desktop strip exactly.
-_HTML = """\
+# Mobile-friendly status page.  Color stops are generated from status.COLOR_STOPS
+# at module load so the phone bar always matches the ambient desktop strip.
+_HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -67,14 +67,7 @@ body {
 <div id="grace"></div>
 <div id="history"></div>
 <script>
-// COLOR_STOPS mirrored from status.py
-const STOPS = [
-  [0.00, 130, 0, 0],
-  [0.25, 255, 60, 0],
-  [0.50, 255, 220, 0],
-  [0.75, 0, 220, 200],
-  [1.00, 30, 80, 255],
-];
+const STOPS = __STOPS__;
 function barColor(f) {
   f = Math.max(0, Math.min(1, f));
   for (let i = 0; i < STOPS.length - 1; i++) {
@@ -145,6 +138,12 @@ if (document.visibilityState === 'visible') _startPing();
 </body>
 </html>"""
 
+_HTML = _HTML_TEMPLATE.replace(
+    "__STOPS__",
+    json.dumps([[lo, r, g, b] for lo, r, g, b in status.COLOR_STOPS]),
+)
+_HTML_BYTES = _HTML.encode()
+
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -188,7 +187,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_html(self):
-        body = _HTML.encode()
+        body = _HTML_BYTES
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
