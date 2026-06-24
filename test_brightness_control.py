@@ -41,6 +41,7 @@ class BrightnessPauseTest(unittest.TestCase):
         self._dt = mock.patch("brightness_control.datetime")
         dt_mock = self._dt.start()
         dt_mock.datetime.now.return_value = _noon_mock()
+        self.bc = brightness_control.BrightnessController()
 
     def tearDown(self):
         self._dt.stop()
@@ -53,7 +54,7 @@ class BrightnessPauseTest(unittest.TestCase):
         self.apply_mock.assert_called_once_with(60)
 
         self.apply_mock.reset_mock()
-        brightness_control.set_brightness_by_fraction(0.5)
+        self.bc.set_by_fraction(0.5)
         self.apply_mock.assert_not_called()
 
     def test_pause_defaults_to_full_brightness(self):
@@ -63,7 +64,7 @@ class BrightnessPauseTest(unittest.TestCase):
     def test_expired_pause_resumes_dimming(self):
         with open(status.brightness_pause_path(), "w") as f:
             f.write(str(time.time() - 1))
-        brightness_control.set_brightness_by_fraction(0.5)
+        self.bc.set_by_fraction(0.5)
         self.apply_mock.assert_called_once_with(50)
 
     def test_unpause_resumes_dimming(self):
@@ -72,7 +73,7 @@ class BrightnessPauseTest(unittest.TestCase):
         self.assertFalse(brightness_control.is_paused())
 
         self.apply_mock.reset_mock()
-        brightness_control.set_brightness_by_fraction(1.0)
+        self.bc.set_by_fraction(1.0)
         self.apply_mock.assert_called_once_with(100)
 
     def test_unpause_without_pause_is_harmless(self):
@@ -95,7 +96,7 @@ class BrightnessLogTest(unittest.TestCase):
         self._dt.start().datetime.now.return_value = _noon_mock()  # circadian == 1.0
         self._paused = mock.patch.object(brightness_control, "is_paused", return_value=False)
         self._paused.start()
-        brightness_control._last_applied = None
+        self.bc = brightness_control.BrightnessController()  # fresh instance, no reset needed
 
     def tearDown(self):
         self._paused.stop()
@@ -104,13 +105,13 @@ class BrightnessLogTest(unittest.TestCase):
 
     def test_change_logs_level_and_cause(self):
         with self.assertLogs("breaktimer.brightness", level="INFO") as cm:
-            brightness_control.set_brightness_by_fraction(0.5)
+            self.bc.set_by_fraction(0.5)
         self.assertTrue(any("50%" in m and "bar 50%" in m for m in cm.output))
 
     def test_unchanged_level_does_not_relog(self):
-        brightness_control.set_brightness_by_fraction(0.5)
+        self.bc.set_by_fraction(0.5)
         with self.assertNoLogs("breaktimer.brightness", level="INFO"):
-            brightness_control.set_brightness_by_fraction(0.5)
+            self.bc.set_by_fraction(0.5)
 
 
 class CircadianFractionTest(unittest.TestCase):

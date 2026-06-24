@@ -13,9 +13,9 @@ import status
 from status import SECONDS_PER_MINUTE, today_str
 import app_blocking
 import blocklist
+import brightness_control
 import firewall
-from brightness_control import set_brightness_by_fraction, start_external_display_detection
-from mouse_sensitivity_control import set_sensitivity_by_fraction, read_original_sensitivity, restore_sensitivity
+import mouse_sensitivity_control
 
 # Why-it-acted trail. A daemon that dims the screen and powers the machine off
 # must say why, on the record. Goes to stderr → journald (the systemd services'
@@ -30,8 +30,8 @@ _HISTORY_DAYS = 400  # covers 12-month sparkline + buffer
 @dataclass
 class TimerConfig:
     """Immutable timer settings, passed as a unit to TimerLoop."""
-    mana_max_seconds: float
-    mana_replenish_seconds: float
+    max_seconds: float
+    replenish_seconds: float
     daily_budget_seconds: float
     daily_limit_seconds: float
 
@@ -270,7 +270,8 @@ class TimerLoop:
 
     def __init__(self, state, offline_duration_seconds, activity_monitor, config: TimerConfig,
                  dispatch=run_effect_inline, save_fn=None,
-                 blocklist=None, app_blocker=None, firewall=None):
+                 blocklist=None, app_blocker=None, firewall=None,
+                 brightness=None, mouse=None):
         self.state = state
         self.activity_monitor = activity_monitor
         # How blocking side effects leave the timer thread. Defaults to inline
@@ -282,6 +283,8 @@ class TimerLoop:
         self._blocklist = blocklist
         self._app_blocker = app_blocker
         self._firewall = firewall
+        self._brightness = brightness
+        self._mouse = mouse
         # All in-process timing is monotonic so NTP steps / suspend can't warp it.
         self.last_loop_time = time.monotonic() - offline_duration_seconds
         self.last_save_time = time.monotonic()
@@ -361,9 +364,9 @@ class TimerLoop:
             current_day_total = self.state.daily_work_totals.get(today, 0)
             self.state.daily_work_totals[today] = current_day_total + time_since_last_loop
         else:
-            rate = (self._config.mana_max_seconds / self._config.mana_replenish_seconds) * self._refill_multiplier()
+            rate = (self._config.max_seconds / self._config.replenish_seconds) * self._refill_multiplier()
             self.state.remaining_time += time_since_last_loop * rate
-            self.state.remaining_time = min(self.state.remaining_time, self._config.mana_max_seconds)
+            self.state.remaining_time = min(self.state.remaining_time, self._config.max_seconds)
     
     def _check_shutdown(self):
         if self.state.remaining_time <= 0:
@@ -408,8 +411,10 @@ class TimerLoop:
     def _apply_hardware_adjustments(self, remaining_fraction, current_loop_time):
         """Dispatch slow hardware side effects (brightness, sensitivity) every 10 s."""
         if current_loop_time - self.last_adjustment_time >= self.ADJUSTMENT_INTERVAL_SECONDS:
-            self._dispatch(lambda: set_brightness_by_fraction(remaining_fraction))
-            self._dispatch(lambda: set_sensitivity_by_fraction(remaining_fraction))
+            if self._brightness:
+                self._dispatch(lambda: self._brightness.set_by_fraction(remaining_fraction))
+            if self._mouse:
+                self._dispatch(lambda: self._mouse.set_by_fraction(remaining_fraction))
             self.last_adjustment_time = current_loop_time
     
     def _grace_remaining(self):
@@ -461,7 +466,7 @@ class TimerLoop:
         """Publish the live snapshot for ambient surfaces (see status.Snapshot)."""
         snapshot = status.Snapshot(
             remaining_seconds=self.state.remaining_time,
-            max_seconds=self._config.mana_max_seconds,
+            max_seconds=self._config.max_seconds,
             is_active=self.state.is_active,
             grace_remaining=self._grace_remaining(),
             refill_rate=self._refill_multiplier(),
@@ -492,7 +497,7 @@ class TimerLoop:
         if self._check_shutdown():
             return True
 
-        remaining_fraction = self.state.remaining_time / self._config.mana_max_seconds
+        remaining_fraction = self.state.remaining_time / self._config.max_seconds
         self._apply_blocking()
         self._apply_hardware_adjustments(remaining_fraction, current_loop_time)
         self._check_notifications()
@@ -551,12 +556,12 @@ def parse_arguments():
         parser.error("--daily-budget-minutes must be positive and below --daily-limit-minutes")
     return args
 
-def initialize_state(args, mana_max_seconds, state_file):
+def initialize_state(args, max_seconds, state_file):
     """Load saved state (or start full), clamping remaining time to the bar cap."""
-    state = TimerState.load(state_file) or TimerState(remaining_time=mana_max_seconds)
+    state = TimerState.load(state_file) or TimerState(remaining_time=max_seconds)
     if args.start_minutes is not None:
         state.remaining_time = args.start_minutes * SECONDS_PER_MINUTE
-    state.remaining_time = min(state.remaining_time, mana_max_seconds)
+    state.remaining_time = min(state.remaining_time, max_seconds)
     return state
 
 def main():
@@ -574,22 +579,24 @@ def main():
     bl = blocklist.Blocklist(state_dir)
     ab = app_blocking.AppBlocker(state_dir)
     fw = firewall.Firewall()
+    bc = brightness_control.BrightnessController()
+    mc = mouse_sensitivity_control.MouseController()
     cfg = TimerConfig(
-        mana_max_seconds=args.deplete_minutes * SECONDS_PER_MINUTE,
-        mana_replenish_seconds=args.replenish_minutes * SECONDS_PER_MINUTE,
+        max_seconds=args.deplete_minutes * SECONDS_PER_MINUTE,
+        replenish_seconds=args.replenish_minutes * SECONDS_PER_MINUTE,
         daily_budget_seconds=args.daily_budget_minutes * SECONDS_PER_MINUTE,
         daily_limit_seconds=args.daily_limit_minutes * SECONDS_PER_MINUTE,
     )
 
-    state = initialize_state(args, cfg.mana_max_seconds, state_file)
+    state = initialize_state(args, cfg.max_seconds, state_file)
 
     activity_monitor = ActivityMonitor()
     activity_monitor.start()
-    start_external_display_detection()
+    brightness_control.start_external_display_detection()
 
     effects = EffectsWorker().start()
 
-    original_sensitivity = read_original_sensitivity()
+    original_sensitivity = mc.read_originals()
 
     # Offline duration is wall-clock (it spans a process/boot gap); fold it into
     # the monotonic activity baseline so the first tick reads as idle downtime.
@@ -607,6 +614,8 @@ def main():
             blocklist=bl,
             app_blocker=ab,
             firewall=fw,
+            brightness=bc,
+            mouse=mc,
         )
         timer_loop.run()
 
@@ -614,7 +623,7 @@ def main():
         state.save(state_file)
     finally:
         activity_monitor.stop()
-        restore_sensitivity(original_sensitivity)
+        mc.restore(original_sensitivity)
         fw.cleanup()
 
 if __name__ == "__main__":

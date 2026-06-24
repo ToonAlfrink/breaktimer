@@ -47,42 +47,45 @@ def _write_speed_to_file(path, value):
     status.atomic_write(path, content)
 
 
-# Last speed actually written, so the why-it-acted log records each real change
-# once rather than re-stating the same value every 10s tick.
-_last_value = None
+class MouseController:
+    """Manages COSMIC pointer-speed overrides as instance state.
 
-
-def set_sensitivity(value):
-    """Set speed value in all COSMIC input configs (range -1.0 to 1.0)."""
-    global _last_value
-    value = round(max(-1.0, min(1.0, value)), 2)
-    if value != _last_value:
-        log.info("pointer speed -> %s", value)
-        _last_value = value
-    for path in CONFIG_FILES:
-        _write_speed_to_file(path, value)
-
-
-def read_original_sensitivity():
-    """Snapshot the user's current speed per config file, for later restore.
-
-    Returns a {path: value} dict the caller owns — no module-level state — so
-    the save/restore pair is an explicit value passed by main(), not hidden
-    global state mutated across a process lifetime.
+    Tracks the last value written so the why-it-acted log fires once per real
+    change rather than repeating the same level every 10 s tick.
     """
-    return {
-        path: value
-        for path in CONFIG_FILES
-        if (value := _read_speed_from_file(path)) is not None
-    }
 
+    def __init__(self, config_files=CONFIG_FILES):
+        self._config_files = config_files
+        self._last_value = None
 
-def restore_sensitivity(originals):
-    if originals:
-        log.info("pointer speed restored: %s", originals)
-    for path, value in originals.items():
-        _write_speed_to_file(path, value)
+    def set(self, value: float) -> None:
+        """Set speed value in all COSMIC input configs (range -1.0 to 1.0)."""
+        value = round(max(-1.0, min(1.0, value)), 2)
+        if value != self._last_value:
+            log.info("pointer speed -> %s", value)
+            self._last_value = value
+        for path in self._config_files:
+            _write_speed_to_file(path, value)
 
-def set_sensitivity_by_fraction(fraction):
-    """Set sensitivity based on remaining time fraction (0.0 to 1.0)."""
-    set_sensitivity(-1.0 + fraction * 2.0)
+    def set_by_fraction(self, fraction: float) -> None:
+        """Set sensitivity based on remaining time fraction (0.0 to 1.0)."""
+        self.set(-1.0 + fraction * 2.0)
+
+    def read_originals(self) -> dict:
+        """Snapshot the user's current speed per config file, for later restore.
+
+        Returns a {path: value} dict — explicit value passed by main(), not hidden
+        module-level state mutated across a process lifetime.
+        """
+        return {
+            path: value
+            for path in self._config_files
+            if (value := _read_speed_from_file(path)) is not None
+        }
+
+    def restore(self, originals: dict) -> None:
+        """Restore pointer speeds from a snapshot returned by read_originals()."""
+        if originals:
+            log.info("pointer speed restored: %s", originals)
+        for path, value in originals.items():
+            _write_speed_to_file(path, value)

@@ -257,8 +257,6 @@ class TestClockResilience(unittest.TestCase):
     def _run_one_tick(self, loop, jumped):
         with mock.patch("main.time.monotonic", return_value=jumped), \
              mock.patch.object(main, "execute_shutdown") as shutdown, \
-             mock.patch.object(main, "set_brightness_by_fraction"), \
-             mock.patch.object(main, "set_sensitivity_by_fraction"), \
              mock.patch.object(main, "_notify"), \
              mock.patch.object(status.Snapshot, "publish"):
             loop.tick()
@@ -775,6 +773,8 @@ class TestDispatchDecoupling(unittest.TestCase):
     def test_hardware_adjustments_go_through_dispatch(self):
         seen = []
         loop = make_loop(3600)
+        loop._brightness = mock.Mock()
+        loop._mouse = mock.Mock()
         loop._dispatch = seen.append
         loop.last_adjustment_time = time.monotonic() - 999
         loop._apply_hardware_adjustments(0.5, time.monotonic())

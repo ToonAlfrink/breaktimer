@@ -9,28 +9,30 @@ Run: python3 -m unittest -q
 import logging
 import unittest
 
-import mouse_sensitivity_control as mouse
+import mouse_sensitivity_control
 
 logging.getLogger("breaktimer").addHandler(logging.NullHandler())
 
 
 class PointerSpeedLogTest(unittest.TestCase):
     def setUp(self):
-        mouse._last_value = None
+        # Empty config_files so no real files are touched.
+        self.mc = mouse_sensitivity_control.MouseController(config_files=())
 
     def test_change_is_logged(self):
         with self.assertLogs("breaktimer.mouse", level="INFO") as cm:
-            mouse.set_sensitivity_by_fraction(0.5)  # -> speed 0.0
+            self.mc.set_by_fraction(0.5)  # -> speed 0.0
         self.assertTrue(any("0.0" in m for m in cm.output))
 
     def test_unchanged_value_does_not_relog(self):
-        mouse.set_sensitivity_by_fraction(0.5)
+        self.mc.set_by_fraction(0.5)
         with self.assertNoLogs("breaktimer.mouse", level="INFO"):
-            mouse.set_sensitivity_by_fraction(0.5)
+            self.mc.set_by_fraction(0.5)
 
     def test_clamps_to_range(self):
-        mouse.set_sensitivity(5.0)
-        self.assertEqual(mouse._last_value, 1.0)
+        with self.assertLogs("breaktimer.mouse", level="INFO") as cm:
+            self.mc.set(5.0)
+        self.assertTrue(any("1.0" in m for m in cm.output))
 
 
 if __name__ == "__main__":

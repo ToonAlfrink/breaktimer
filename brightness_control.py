@@ -70,10 +70,6 @@ class _ExternalDisplays:
 
 _external_displays = _ExternalDisplays()
 
-# Last percentage actually applied, so the why-it-acted log records each real
-# change once instead of re-stating the same level every 10s tick.
-_last_applied = None
-
 
 def start_external_display_detection():
     _external_displays.detect()
@@ -145,22 +141,34 @@ def _apply_to_all_displays(percentage):
         set_external_brightness(display_num, percentage)
 
 
-def set_brightness_by_fraction(fraction):
-    """Set all displays' brightness, composing depletion and time-of-day.
+class BrightnessController:
+    """Manages display brightness overrides as instance state.
 
-    Final brightness = depletion_fraction × circadian_fraction, so a full bar
-    at 1 am still dims the screen to the circadian floor rather than blasting
-    cold-bright light. No-op while paused (see pause()/unpause()).
+    Tracks the last percentage applied so the why-it-acted log fires once per
+    real change rather than repeating the same level every 10 s tick.
+    The circadian and pause logic stays here; the cross-process pause file
+    (pause()/unpause()/is_paused()) remains module-level since ambient.py and
+    the CLI also read it.
     """
-    global _last_applied
-    if is_paused():
-        return
-    now = datetime.datetime.now()
-    hour = now.hour + now.minute / 60
-    circadian = circadian_fraction(hour)
-    percentage = max(0, min(100, int(fraction * circadian * 100)))
-    if percentage != _last_applied:
-        log.info("brightness -> %d%% (bar %d%%, time-of-day %d%%)",
-                 percentage, int(fraction * 100), int(circadian * 100))
-        _last_applied = percentage
-    _apply_to_all_displays(percentage)
+
+    def __init__(self):
+        self._last_applied = None
+
+    def set_by_fraction(self, fraction: float) -> None:
+        """Set all displays' brightness, composing depletion and time-of-day.
+
+        Final brightness = depletion_fraction × circadian_fraction, so a full bar
+        at 1 am still dims the screen to the circadian floor rather than blasting
+        cold-bright light. No-op while paused (see pause()/unpause()).
+        """
+        if is_paused():
+            return
+        now = datetime.datetime.now()
+        hour = now.hour + now.minute / 60
+        circadian = circadian_fraction(hour)
+        percentage = max(0, min(100, int(fraction * circadian * 100)))
+        if percentage != self._last_applied:
+            log.info("brightness -> %d%% (bar %d%%, time-of-day %d%%)",
+                     percentage, int(fraction * 100), int(circadian * 100))
+            self._last_applied = percentage
+        _apply_to_all_displays(percentage)
