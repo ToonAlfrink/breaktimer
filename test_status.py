@@ -26,29 +26,28 @@ class InTempRuntimeDir(unittest.TestCase):
 
 class TestStatusFile(InTempRuntimeDir):
     def test_round_trip(self):
-        status.write_status({"remaining_seconds": 42.0, "is_active": True})
-        self.assertEqual(
-            status.read_status(),
-            {"remaining_seconds": 42.0, "is_active": True},
-        )
+        status.Snapshot(remaining_seconds=42.0, is_active=True).publish()
+        snap = status.Snapshot.read()
+        self.assertEqual(snap.remaining_seconds, 42.0)
+        self.assertTrue(snap.is_active)
 
     def test_write_is_atomic_leaves_no_temp_file(self):
-        status.write_status({"x": 1})
+        status.Snapshot().publish()
         self.assertEqual(os.listdir(self._tmp.name), ["breaktimer-status.json"])
 
     def test_missing_returns_none(self):
-        self.assertIsNone(status.read_status())
+        self.assertIsNone(status.Snapshot.read())
 
     def test_stale_returns_none(self):
-        status.write_status({"x": 1})
+        status.Snapshot().publish()
         old = time.time() - 60
         os.utime(status.status_path(), (old, old))
-        self.assertIsNone(status.read_status(max_age_seconds=5))
+        self.assertIsNone(status.Snapshot.read(max_age_seconds=5))
 
     def test_corrupt_returns_none(self):
         with open(status.status_path(), "w") as f:
             f.write("{truncated")
-        self.assertIsNone(status.read_status())
+        self.assertIsNone(status.Snapshot.read())
 
 
 class TestSingletonLock(InTempRuntimeDir):

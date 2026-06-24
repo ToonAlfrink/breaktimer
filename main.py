@@ -26,6 +26,15 @@ log = logging.getLogger("breaktimer.core")
 
 _HISTORY_DAYS = 400  # covers 12-month sparkline + buffer
 
+
+@dataclass
+class TimerConfig:
+    """Immutable timer settings, passed as a unit to TimerLoop."""
+    mana_max_seconds: float
+    mana_replenish_seconds: float
+    daily_budget_seconds: float
+    daily_limit_seconds: float
+
 # Phone pings arrive every 2 s while the mobile page is foregrounded.  A ping
 # older than this is treated as gone — the phone was backgrounded or the page
 # closed.  Generous enough to absorb a missed poll or two, tight enough that
@@ -93,7 +102,6 @@ class TimerState:
 class ActivityMonitor:
     def __init__(self):
         self.last_activity_time = time.monotonic()
-        self.is_running = False
         self.libinput_process = None
         self.monitor_thread = None
         self.lock = threading.Lock()
@@ -101,12 +109,10 @@ class ActivityMonitor:
         self._stop_event = threading.Event()
 
     def start(self):
-        self.is_running = True
         self.monitor_thread = threading.Thread(target=self._monitor_thread, daemon=True)
         self.monitor_thread.start()
 
     def stop(self):
-        self.is_running = False
         self._stop_event.set()
         if self.libinput_process:
             self.libinput_process.terminate()
@@ -126,7 +132,7 @@ class ActivityMonitor:
 
     def _monitor_thread(self):
         backoff = 1
-        while self.is_running:
+        while not self._stop_event.is_set():
             try:
                 self.libinput_process = subprocess.Popen(
                     ['libinput', 'debug-events'],
@@ -139,7 +145,7 @@ class ActivityMonitor:
                 backoff = 1
 
                 for line in self.libinput_process.stdout:
-                    if not self.is_running:
+                    if self._stop_event.is_set():
                         break
                     if line.strip():
                         with self.lock:
@@ -159,7 +165,7 @@ class ActivityMonitor:
                     except Exception:
                         pass
 
-            if self.is_running:
+            if not self._stop_event.is_set():
                 self._stop_event.wait(backoff)
                 backoff = min(backoff * 2, 60)
 
@@ -244,6 +250,7 @@ class EffectsWorker:
         except queue.Full:
             try:
                 self._queue.get_nowait()  # drop the stalest job to make room
+                log.warning("effects queue full; dropped stale job (slow subprocess?)")
                 self._queue.put_nowait(effect)
             except queue.Empty:
                 pass
@@ -271,8 +278,7 @@ class TimerLoop:
     # is the backstop for everything else, and it always errs toward the user.)
     MAX_TICK_SECONDS = SECONDS_PER_MINUTE
 
-    def __init__(self, state, offline_duration_seconds, activity_monitor, mana_max_seconds,
-                 mana_replenish_seconds, daily_budget_seconds, daily_limit_seconds,
+    def __init__(self, state, offline_duration_seconds, activity_monitor, config: TimerConfig,
                  dispatch=run_effect_inline):
         self.state = state
         self.activity_monitor = activity_monitor
@@ -280,10 +286,10 @@ class TimerLoop:
         # (synchronous, deterministic); production injects EffectsWorker.submit
         # so a slow subprocess can't stall the heartbeat.
         self._dispatch = dispatch
-        self.mana_max_seconds = mana_max_seconds
-        self.mana_replenish_seconds = mana_replenish_seconds
-        self.daily_budget_seconds = daily_budget_seconds
-        self.daily_limit_seconds = daily_limit_seconds
+        self.mana_max_seconds = config.mana_max_seconds
+        self.mana_replenish_seconds = config.mana_replenish_seconds
+        self.daily_budget_seconds = config.daily_budget_seconds
+        self.daily_limit_seconds = config.daily_limit_seconds
         # All in-process timing is monotonic so NTP steps / suspend can't warp it.
         self.last_loop_time = time.monotonic() - offline_duration_seconds
         self.last_save_time = time.monotonic()
@@ -298,8 +304,8 @@ class TimerLoop:
             if self.state.remaining_time <= threshold
         }
         today_total = self.state.daily_work_totals.get(today_str(), 0)
-        for name, threshold in (("budget", daily_budget_seconds),
-                                ("limit", daily_limit_seconds)):
+        for name, threshold in (("budget", self.daily_budget_seconds),
+                                ("limit", self.daily_limit_seconds)):
             if today_total >= threshold:
                 self._notified.add(f"daily-{name}-{today_str()}")
     
@@ -574,10 +580,14 @@ def main():
     args = parse_arguments()
     blocklist.init(STATE_DIR)
     app_blocking.init(STATE_DIR)
-    mana_max_seconds = args.deplete_minutes * SECONDS_PER_MINUTE
-    mana_replenish_seconds = args.replenish_minutes * SECONDS_PER_MINUTE
+    cfg = TimerConfig(
+        mana_max_seconds=args.deplete_minutes * SECONDS_PER_MINUTE,
+        mana_replenish_seconds=args.replenish_minutes * SECONDS_PER_MINUTE,
+        daily_budget_seconds=args.daily_budget_minutes * SECONDS_PER_MINUTE,
+        daily_limit_seconds=args.daily_limit_minutes * SECONDS_PER_MINUTE,
+    )
 
-    state = initialize_state(args, mana_max_seconds)
+    state = initialize_state(args, cfg.mana_max_seconds)
 
     activity_monitor = ActivityMonitor()
     activity_monitor.start()
@@ -597,10 +607,7 @@ def main():
             state,
             offline_duration_seconds,
             activity_monitor,
-            mana_max_seconds,
-            mana_replenish_seconds,
-            args.daily_budget_minutes * SECONDS_PER_MINUTE,
-            args.daily_limit_minutes * SECONDS_PER_MINUTE,
+            cfg,
             dispatch=effects.submit,
         )
         timer_loop.run()

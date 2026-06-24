@@ -21,6 +21,7 @@ from unittest import mock
 import main
 import status
 from main import (
+    TimerConfig,
     TimerLoop,
     TimerState,
     compute_offline_duration_seconds,
@@ -58,8 +59,8 @@ def make_loop(remaining, max_seconds=3600, replenish_seconds=1200,
     state = TimerState(remaining_time=remaining)
     if today_total is not None:
         state.daily_work_totals[main.today_str()] = today_total
-    return TimerLoop(state, 0, StubMonitor(), max_seconds, replenish_seconds,
-                     daily_budget_seconds, daily_limit_seconds)
+    cfg = TimerConfig(max_seconds, replenish_seconds, daily_budget_seconds, daily_limit_seconds)
+    return TimerLoop(state, 0, StubMonitor(), cfg)
 
 
 class InTempDir(unittest.TestCase):
@@ -258,7 +259,7 @@ class TestClockResilience(InTempDir):
              mock.patch.object(main, "set_brightness_by_fraction"), \
              mock.patch.object(main, "set_sensitivity_by_fraction"), \
              mock.patch.object(main, "_notify"), \
-             mock.patch.object(status, "write_status"):
+             mock.patch.object(status.Snapshot, "publish"):
             loop.tick()
         return shutdown
 
@@ -388,7 +389,7 @@ class TestRestartAfterShutdown(InTempDir):
         save_state_to_file(state)
         loaded = load_state_from_file()
 
-        loop = TimerLoop(loaded, 0, StubMonitor(), 3600, 1200, 8 * 3600, 10 * 3600)
+        loop = TimerLoop(loaded, 0, StubMonitor(), TimerConfig(3600, 1200, 8 * 3600, 10 * 3600))
         loop.state.is_active = False
         loop._adjust_timer(1)
         with mock.patch.object(main, "execute_shutdown"):
@@ -552,7 +553,7 @@ class TestNotifications(unittest.TestCase):
 class TestWriteStatusOSError(unittest.TestCase):
     def test_warns_once_then_silent(self):
         loop = make_loop(900)
-        with mock.patch("status.write_status", side_effect=OSError("no tmpfs")):
+        with mock.patch.object(status.Snapshot, "publish", side_effect=OSError("no tmpfs")):
             with self.assertLogs("breaktimer.core", level="WARNING") as cm:
                 loop._write_status()
                 loop._write_status()  # second call must stay silent
@@ -562,17 +563,16 @@ class TestWriteStatusOSError(unittest.TestCase):
 
 class TestLiveStatus(unittest.TestCase):
     def test_loop_publishes_snapshot(self):
-        import status as status_mod
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp}):
             loop = make_loop(900)
             loop.grace_start = time.monotonic() - 10
             loop._write_status()
-            snap = status_mod.read_status()
-        self.assertEqual(snap["remaining_seconds"], 900)
-        self.assertEqual(snap["max_seconds"], 3600)
-        self.assertAlmostEqual(snap["grace_remaining"], 50, delta=2)
-        self.assertIn("history", snap)
+            snap = status.Snapshot.read()
+        self.assertEqual(snap.remaining_seconds, 900)
+        self.assertEqual(snap.max_seconds, 3600)
+        self.assertAlmostEqual(snap.grace_remaining, 50, delta=2)
+        self.assertIsInstance(snap.history, str)
 
 
 class TestUnconditionalLimit(unittest.TestCase):
@@ -669,9 +669,11 @@ class TestRefillFatigue(unittest.TestCase):
 
     def test_status_payload_includes_refill_rate(self):
         loop = make_loop(600, today_total=9 * 3600)
-        with mock.patch.object(status, "write_status") as write:
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp}):
             loop._write_status()
-        self.assertAlmostEqual(write.call_args[0][0]["refill_rate"], 0.5)
+            snap = status.Snapshot.read()
+        self.assertAlmostEqual(snap.refill_rate, 0.5)
 
 
 class TestDailyNotifications(unittest.TestCase):
@@ -812,7 +814,7 @@ class TestPhoneActivity(unittest.TestCase):
         # Start with last activity far in the past so the loop defaults to idle
         monitor.set_last_activity_time(time.monotonic() - 9999)
         state = TimerState(remaining_time=remaining)
-        loop = TimerLoop(state, 0, monitor, 3600, replenish_seconds, 8 * 3600, 10 * 3600)
+        loop = TimerLoop(state, 0, monitor, TimerConfig(3600, replenish_seconds, 8 * 3600, 10 * 3600))
         return loop, monitor
 
     def _with_ping(self, tmpdir, age_seconds=0):

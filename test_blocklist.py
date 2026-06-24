@@ -568,7 +568,7 @@ class TestBlocklistIntegration(unittest.TestCase):
     def test_blocking_dispatched_every_tick(self):
         """_apply_blocking must dispatch blocklist + app_blocking on every call."""
         import main
-        from main import TimerState, TimerLoop
+        from main import TimerState, TimerLoop, TimerConfig
         import time
 
         dispatched = []
@@ -578,7 +578,7 @@ class TestBlocklistIntegration(unittest.TestCase):
         monitor.is_healthy.return_value = True
         monitor.get_last_activity_time.return_value = time.monotonic()
 
-        loop = TimerLoop(state, 0, monitor, 3600, 1200, 8 * 3600, 10 * 3600,
+        loop = TimerLoop(state, 0, monitor, TimerConfig(3600, 1200, 8 * 3600, 10 * 3600),
                          dispatch=dispatched.append)
 
         loop._apply_blocking()
@@ -590,7 +590,7 @@ class TestBlocklistIntegration(unittest.TestCase):
     def test_blocklist_effect_calls_apply_with_timer_state(self):
         """The dispatched blocklist lambda must invoke blocklist.apply with is_active and strict."""
         import main
-        from main import TimerState, TimerLoop
+        from main import TimerState, TimerLoop, TimerConfig
         import time
 
         dispatched = []
@@ -601,7 +601,7 @@ class TestBlocklistIntegration(unittest.TestCase):
         monitor.is_healthy.return_value = True
         monitor.get_last_activity_time.return_value = time.monotonic()
 
-        loop = TimerLoop(state, 0, monitor, 3600, 1200, 8 * 3600, 10 * 3600,
+        loop = TimerLoop(state, 0, monitor, TimerConfig(3600, 1200, 8 * 3600, 10 * 3600),
                          dispatch=dispatched.append)
 
         loop._apply_blocking()
@@ -615,7 +615,7 @@ class TestBlocklistIntegration(unittest.TestCase):
     def test_strict_true_when_refill_exhausted(self):
         """strict=True must be passed to apply() when daily limit is reached."""
         import main
-        from main import TimerState, TimerLoop
+        from main import TimerState, TimerLoop, TimerConfig
         import time
 
         dispatched = []
@@ -628,7 +628,7 @@ class TestBlocklistIntegration(unittest.TestCase):
         monitor.is_healthy.return_value = True
         monitor.get_last_activity_time.return_value = time.monotonic()
 
-        loop = TimerLoop(state, 0, monitor, 3600, 1200, 8 * 3600, 10 * 3600,
+        loop = TimerLoop(state, 0, monitor, TimerConfig(3600, 1200, 8 * 3600, 10 * 3600),
                          dispatch=dispatched.append)
 
         loop._apply_blocking()

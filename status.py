@@ -30,28 +30,6 @@ def status_path():
     return os.path.join(_runtime_dir(), "breaktimer-status.json")
 
 
-def write_status(payload):
-    """Atomically write the live status snapshot (owner-readable only)."""
-    path = status_path()
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(payload, f)
-    os.replace(tmp, path)
-
-
-def read_status(max_age_seconds=5.0):
-    """Return the latest status dict, or None if missing, stale, or corrupt."""
-    path = status_path()
-    try:
-        if time.time() - os.stat(path).st_mtime > max_age_seconds:
-            return None
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
-
-
 @dataclass
 class Snapshot:
     """The contract between the timer core and every display surface.
@@ -74,12 +52,25 @@ class Snapshot:
     history: str = ""                      # one-line work-history summary
 
     def publish(self):
-        write_status(asdict(self))
+        """Atomically write this snapshot to the runtime status file."""
+        path = status_path()
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(asdict(self), f)
+        os.replace(tmp, path)
 
     @classmethod
     def read(cls, max_age_seconds=5.0):
         """Latest snapshot, or None if missing, stale, corrupt, or malformed."""
-        data = read_status(max_age_seconds)
+        path = status_path()
+        try:
+            if time.time() - os.stat(path).st_mtime > max_age_seconds:
+                return None
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
         if not isinstance(data, dict):
             return None
         known = {f.name for f in fields(cls)}
