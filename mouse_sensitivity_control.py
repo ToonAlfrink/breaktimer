@@ -33,11 +33,11 @@ def _read_speed_from_file(path):
 
 def _write_speed_to_file(path, value):
     """Write speed value into a given COSMIC input config file if present."""
-    if not os.path.exists(path):
+    try:
+        with open(path) as f:
+            content = f.read()
+    except OSError:
         return
-
-    with open(path, "r") as f:
-        content = f.read()
 
     if "speed:" not in content:
         return

@@ -134,12 +134,10 @@ def _read_hosts(path: str) -> str:
 class Blocklist:
     """Manages /etc/hosts domain blocklist as instance state."""
 
-    DOH_SERVER_DOMAINS: frozenset = DOH_SERVER_DOMAINS
-
     def __init__(self, state_dir: str, hosts_path: str = HOSTS_PATH, doh_domains=None):
         self._tiers: status.TierSet = status.TierSet.for_prefix(state_dir, "blocklist")
         self._hosts_path = hosts_path
-        self.doh_domains = doh_domains if doh_domains is not None else frozenset(self.DOH_SERVER_DOMAINS)
+        self.doh_domains = doh_domains if doh_domains is not None else DOH_SERVER_DOMAINS
         # Last block actually written — skip the filesystem round-trip when unchanged.
         self._last_written: str | None = None
         # mtime_ns of hosts_path at the moment we last wrote it.

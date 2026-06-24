@@ -50,22 +50,14 @@ class StubMonitor:
         return self._healthy
 
 
-class _NoopBlocker:
-    """No-op stand-in for blocklist/app_blocker/firewall in tests."""
-    def apply(self, **kw): pass
-    def cleanup(self): pass
-
-
 def make_loop(remaining, max_seconds=3600, replenish_seconds=1200,
               daily_budget_seconds=8 * 3600, daily_limit_seconds=10 * 3600,
               today_total=None, save_fn=None):
     state = TimerState(remaining_time=remaining)
     if today_total is not None:
-        state.daily_work_totals[main.today_str()] = today_total
+        state.daily_work_totals[status.today_str()] = today_total
     cfg = TimerConfig(max_seconds, replenish_seconds, daily_budget_seconds, daily_limit_seconds)
-    return TimerLoop(state, 0, StubMonitor(), cfg, save_fn=save_fn,
-                     blocklist=_NoopBlocker(), app_blocker=_NoopBlocker(),
-                     firewall=_NoopBlocker())
+    return TimerLoop(state, 0, StubMonitor(), cfg, save_fn=save_fn)
 
 
 class InTempDir(unittest.TestCase):
@@ -125,7 +117,7 @@ class TestTimerArithmetic(unittest.TestCase):
         loop.state.is_active = True
         loop._adjust_timer(10)
         self.assertEqual(loop.state.remaining_time, 590)
-        self.assertEqual(loop.state.daily_work_totals[main.today_str()], 10)
+        self.assertEqual(loop.state.daily_work_totals[status.today_str()], 10)
 
     def test_idle_replenishes_at_deplete_to_replenish_ratio(self):
         # 3600s cap / 1200s replenish = 3x refill speed
@@ -133,7 +125,7 @@ class TestTimerArithmetic(unittest.TestCase):
         loop.state.is_active = False
         loop._adjust_timer(10)
         self.assertEqual(loop.state.remaining_time, 630)
-        self.assertNotIn(main.today_str(), loop.state.daily_work_totals)
+        self.assertNotIn(status.today_str(), loop.state.daily_work_totals)
 
     def test_replenish_clamps_at_max(self):
         loop = make_loop(3590, max_seconds=3600, replenish_seconds=1200)
@@ -210,7 +202,7 @@ class TestActionTrail(unittest.TestCase):
 
     def test_daily_limit_crossing_is_logged(self):
         loop = make_loop(900)  # starts below budget so the crossing is genuine
-        loop.state.daily_work_totals[main.today_str()] = 10 * 3600
+        loop.state.daily_work_totals[status.today_str()] = 10 * 3600
         with self.assertLogs("breaktimer.core", level="INFO") as cm:
             loop._check_notifications()
         self.assertTrue(any("daily limit crossed" in m for m in cm.output))
@@ -384,13 +376,11 @@ class TestRestartAfterShutdown(InTempDir):
 
     def test_restart_at_zero_past_limit_enters_grace(self):
         state = TimerState(remaining_time=0)
-        state.daily_work_totals[main.today_str()] = 10 * 3600
+        state.daily_work_totals[status.today_str()] = 10 * 3600
         state.save(self._state_file)
         loaded = TimerState.load(self._state_file)
 
-        loop = TimerLoop(loaded, 0, StubMonitor(), TimerConfig(3600, 1200, 8 * 3600, 10 * 3600),
-                         blocklist=_NoopBlocker(), app_blocker=_NoopBlocker(),
-                         firewall=_NoopBlocker())
+        loop = TimerLoop(loaded, 0, StubMonitor(), TimerConfig(3600, 1200, 8 * 3600, 10 * 3600))
         loop.state.is_active = False
         loop._adjust_timer(1)
         with mock.patch.object(main, "execute_shutdown"):
@@ -783,6 +773,9 @@ class TestDispatchDecoupling(unittest.TestCase):
     def test_blocking_adjustments_go_through_dispatch(self):
         seen = []
         loop = make_loop(3600)
+        loop._blocklist = mock.Mock()
+        loop._app_blocker = mock.Mock()
+        loop._firewall = mock.Mock()
         loop._dispatch = seen.append
         loop._apply_blocking()
         self.assertEqual(len(seen), 3)  # blocklist + app_blocking + firewall
@@ -801,6 +794,9 @@ class TestDispatchDecoupling(unittest.TestCase):
         """Blocking must dispatch on every call — it has no time gate."""
         seen = []
         loop = make_loop(3600)
+        loop._blocklist = mock.Mock()
+        loop._app_blocker = mock.Mock()
+        loop._firewall = mock.Mock()
         loop._dispatch = seen.append
         # Call twice in rapid succession — both must dispatch
         loop._apply_blocking()
