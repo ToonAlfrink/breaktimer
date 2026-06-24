@@ -37,30 +37,6 @@ app_blocklist_strict_file: str | None = None    # strict tier
 app_blocklist_schedule_file: str | None = None  # schedule tier
 
 
-def _read_names(path: str | None) -> list[str]:
-    """Return app names from a flat file (deduplicated, lowercased, sorted).
-
-    Returns an empty list if path is None, missing, or blank.
-    """
-    if not path:
-        return []
-    try:
-        with open(path) as f:
-            lines = f.readlines()
-    except OSError:
-        return []
-    seen: set[str] = set()
-    names: list[str] = []
-    for raw in lines:
-        name = raw.strip().lower()
-        if name and not name.startswith("#") and name not in seen:
-            seen.add(name)
-            names.append(name)
-    return sorted(names)
-
-
-
-
 def _find_pids(name: str) -> list[int]:
     """Return PIDs of processes whose name exactly matches (case-insensitive).
 
@@ -88,36 +64,6 @@ def _kill(pid: int) -> bool:
         return False
 
 
-def read_names() -> list[str]:
-    """Return always-blocked app names from blocklist-apps.txt."""
-    return _read_names(app_blocklist_file)
-
-
-def read_names_active() -> list[str]:
-    """Return work-session app names from blocklist-apps-active.txt."""
-    return _read_names(app_blocklist_active_file)
-
-
-def read_names_strict() -> list[str]:
-    """Return strict-tier app names from blocklist-apps-strict.txt."""
-    return _read_names(app_blocklist_strict_file)
-
-
-def read_names_schedule(now_min: int | None = None) -> list[str]:
-    """Return schedule-tier app names from blocklist-apps-schedule.txt active right now."""
-    return status.active_schedule_items(app_blocklist_schedule_file, now_min)
-
-
-def read_schedule_windows(now_min: int | None = None) -> list[tuple[int, int, list[str], bool]]:
-    """Return all schedule windows from blocklist-apps-schedule.txt with their active state.
-
-    Each entry is (start_min, end_min, names, is_active_now). Returns all
-    windows regardless of whether they are currently active — useful for
-    displaying the full schedule configuration in 'breaktimer blocklist'.
-    """
-    return status.parse_schedule_file(app_blocklist_schedule_file, now_min)
-
-
 def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = None) -> None:
     """Kill any running process whose name appears in the active tier union.
 
@@ -128,9 +74,9 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     Each killed process is logged with name, PID, and which tier(s) triggered
     it. Processes belonging to other users are silently skipped.
     """
-    always_names   = set(_read_names(app_blocklist_file))
-    active_names   = set(_read_names(app_blocklist_active_file)) if is_active else set()
-    strict_names   = set(_read_names(app_blocklist_strict_file)) if strict else set()
+    always_names   = set(status.read_items(app_blocklist_file))
+    active_names   = set(status.read_items(app_blocklist_active_file)) if is_active else set()
+    strict_names   = set(status.read_items(app_blocklist_strict_file)) if strict else set()
     schedule_names = set(status.active_schedule_items(app_blocklist_schedule_file, _now_min))
 
     # Map each name to the tier(s) that triggered it (for the log).

@@ -196,6 +196,35 @@ def format_history_line(daily_work_totals):
 
 
 # ---------------------------------------------------------------------------
+# Flat-file item reader — shared by blocklist.py and app_blocking.py
+# ---------------------------------------------------------------------------
+
+def read_items(path: str | None) -> list[str]:
+    """Read a flat list of items from a file (comments and blanks stripped, deduped, sorted).
+
+    Returns an empty list if path is None, missing, or blank.
+    Format: one item per line; lines starting with '#' and blank lines are ignored;
+    items are lowercased and deduplicated. Used by blocklist.py and app_blocking.py
+    to read their tier files (domains and process names share the same format).
+    """
+    if not path:
+        return []
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    seen: set[str] = set()
+    items: list[str] = []
+    for raw in lines:
+        item = raw.strip().lower()
+        if item and not item.startswith("#") and item not in seen:
+            seen.add(item)
+            items.append(item)
+    return sorted(items)
+
+
+# ---------------------------------------------------------------------------
 # Schedule-window utilities — shared by blocklist.py and app_blocking.py
 # ---------------------------------------------------------------------------
 

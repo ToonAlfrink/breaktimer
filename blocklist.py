@@ -90,70 +90,6 @@ _last_written_mtime_ns: int | None = None
 _write_failed = False
 
 
-def _read_file_domains(path: str | None) -> list[str]:
-    """Return domains from a single file (deduplicated, sorted).
-
-    Returns an empty list if path is None, missing, or blank.
-    """
-    if not path:
-        return []
-    try:
-        with open(path) as f:
-            lines = f.readlines()
-    except OSError:
-        return []
-
-    domains: list[str] = []
-    seen: set[str] = set()
-    for raw in lines:
-        d = raw.strip()
-        if d and not d.startswith("#"):
-            d = d.lower()
-            if d not in seen:
-                seen.add(d)
-                domains.append(d)
-    return sorted(domains)
-
-
-
-
-def read_domains() -> list[str]:
-    """Return always-blocked domains from blocklist.txt (deduplicated, sorted).
-
-    Returns an empty list if the file is missing or blank.
-    """
-    return _read_file_domains(blocklist_file)
-
-
-def read_domains_active() -> list[str]:
-    """Return work-session domains from blocklist-active.txt (deduplicated, sorted)."""
-    return _read_file_domains(blocklist_active_file)
-
-
-def read_domains_strict() -> list[str]:
-    """Return strict-tier domains from blocklist-strict.txt (deduplicated, sorted)."""
-    return _read_file_domains(blocklist_strict_file)
-
-
-def read_domains_schedule(now_min: int | None = None) -> list[str]:
-    """Return schedule-tier domains from blocklist-schedule.txt active right now.
-
-    now_min: minutes since midnight (0–1439). Pass an explicit value for testing;
-    omit to use the current wall-clock time.
-    """
-    return status.active_schedule_items(blocklist_schedule_file, now_min)
-
-
-def read_schedule_windows(now_min: int | None = None) -> list[tuple[int, int, list[str], bool]]:
-    """Return all schedule windows from blocklist-schedule.txt with their active state.
-
-    Each entry is (start_min, end_min, domains, is_active_now). Returns all
-    windows regardless of whether they are currently active — useful for
-    displaying the full schedule configuration in 'breaktimer blocklist'.
-    """
-    return status.parse_schedule_file(blocklist_schedule_file, now_min)
-
-
 def _block_lines(domains: list[str]) -> str:
     """Build the /etc/hosts block content (with markers) for the given domains.
 
@@ -251,9 +187,9 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     """
     global _last_written, _last_written_mtime_ns, _write_failed
 
-    always_domains   = set(_read_file_domains(blocklist_file))
-    active_domains   = set(_read_file_domains(blocklist_active_file)) if is_active else set()
-    strict_domains   = set(_read_file_domains(blocklist_strict_file)) if strict else set()
+    always_domains   = set(status.read_items(blocklist_file))
+    active_domains   = set(status.read_items(blocklist_active_file)) if is_active else set()
+    strict_domains   = set(status.read_items(blocklist_strict_file)) if strict else set()
     schedule_domains = set(status.active_schedule_items(blocklist_schedule_file, _now_min))
 
     user_domains = always_domains | active_domains | strict_domains | schedule_domains

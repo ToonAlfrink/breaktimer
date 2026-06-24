@@ -83,50 +83,6 @@ class InTempDir(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _read_file_domains / read_domains / read_domains_active / read_domains_strict
-# ---------------------------------------------------------------------------
-
-class TestReadDomains(InTempDir):
-    def test_empty_file_returns_empty(self):
-        _set_always(self.tmpdir, "")
-        self.assertEqual(blocklist.read_domains(), [])
-
-    def test_missing_file_returns_empty(self):
-        blocklist.blocklist_file = os.path.join(self.tmpdir, "missing.txt")
-        self.assertEqual(blocklist.read_domains(), [])
-
-    def test_returns_sorted_lowercase_domains(self):
-        _set_always(self.tmpdir, "Reddit.com\n9gag.com\n")
-        self.assertEqual(blocklist.read_domains(), ["9gag.com", "reddit.com"])
-
-    def test_strips_blank_lines_and_comments(self):
-        _set_always(self.tmpdir, "# a comment\n\nexample.com\n")
-        self.assertEqual(blocklist.read_domains(), ["example.com"])
-
-    def test_deduplicates(self):
-        _set_always(self.tmpdir, "example.com\nexample.com\n")
-        self.assertEqual(blocklist.read_domains(), ["example.com"])
-
-    def test_no_file_configured_returns_empty(self):
-        blocklist.blocklist_file = None
-        self.assertEqual(blocklist.read_domains(), [])
-
-    def test_read_domains_active_empty_when_file_missing(self):
-        self.assertEqual(blocklist.read_domains_active(), [])
-
-    def test_read_domains_active_returns_domains(self):
-        _set_active(self.tmpdir, "twitter.com\n")
-        self.assertEqual(blocklist.read_domains_active(), ["twitter.com"])
-
-    def test_read_domains_strict_empty_when_file_missing(self):
-        self.assertEqual(blocklist.read_domains_strict(), [])
-
-    def test_read_domains_strict_returns_domains(self):
-        _set_strict(self.tmpdir, "news.ycombinator.com\n")
-        self.assertEqual(blocklist.read_domains_strict(), ["news.ycombinator.com"])
-
-
-# ---------------------------------------------------------------------------
 # _block_lines
 # ---------------------------------------------------------------------------
 
@@ -528,84 +484,6 @@ class TestBlocklistActionTrail(InTempDir):
         self.assertTrue(any("twitter.com" in m for m in cm.output))
 
 
-# ---------------------------------------------------------------------------
-# Schedule tier
-# ---------------------------------------------------------------------------
-
-class TestScheduleTier(InTempDir):
-    """Schedule tier: time-window-gated domain blocking."""
-
-    def test_missing_file_returns_empty(self):
-        blocklist.blocklist_schedule_file = os.path.join(self.tmpdir, "missing.txt")
-        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
-
-    def test_no_file_configured_returns_empty(self):
-        blocklist.blocklist_schedule_file = None
-        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
-
-    def test_in_window_returns_domains(self):
-        _set_schedule(self.tmpdir, "# 09:00-17:00\nreddit.com\n")
-        result = blocklist.read_domains_schedule(now_min=12 * 60)
-        self.assertEqual(result, ["reddit.com"])
-
-    def test_out_of_window_returns_empty(self):
-        _set_schedule(self.tmpdir, "# 09:00-17:00\nreddit.com\n")
-        result = blocklist.read_domains_schedule(now_min=20 * 60)
-        self.assertEqual(result, [])
-
-    def test_wraparound_window_inside(self):
-        _set_schedule(self.tmpdir, "# 22:00-08:00\nyoutube.com\n")
-        self.assertEqual(blocklist.read_domains_schedule(now_min=23 * 60), ["youtube.com"])
-
-    def test_wraparound_window_outside(self):
-        _set_schedule(self.tmpdir, "# 22:00-08:00\nyoutube.com\n")
-        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
-
-    def test_multiple_windows_both_active(self):
-        content = "# 09:00-17:00\nwork.com\n\n# 22:00-08:00\nyoutube.com\n"
-        _set_schedule(self.tmpdir, content)
-        # 23:00 is in the 22:00-08:00 window but NOT in 09:00-17:00
-        result = blocklist.read_domains_schedule(now_min=23 * 60)
-        self.assertEqual(result, ["youtube.com"])
-
-    def test_multiple_windows_first_active(self):
-        content = "# 09:00-17:00\nwork.com\n\n# 22:00-08:00\nnight.com\n"
-        _set_schedule(self.tmpdir, content)
-        result = blocklist.read_domains_schedule(now_min=12 * 60)
-        self.assertEqual(result, ["work.com"])
-
-    def test_domains_before_first_window_are_ignored(self):
-        content = "orphan.com\n# 09:00-17:00\nvalid.com\n"
-        _set_schedule(self.tmpdir, content)
-        result = blocklist.read_domains_schedule(now_min=12 * 60)
-        self.assertNotIn("orphan.com", result)
-        self.assertIn("valid.com", result)
-
-    def test_empty_file_returns_empty(self):
-        _set_schedule(self.tmpdir, "")
-        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
-
-    def test_comment_only_file_returns_empty(self):
-        _set_schedule(self.tmpdir, "# just a comment\n# another comment\n")
-        self.assertEqual(blocklist.read_domains_schedule(now_min=12 * 60), [])
-
-    def test_deduplicates_across_active_windows(self):
-        content = "# 09:00-17:00\ndup.com\n\n# 10:00-16:00\ndup.com\n"
-        _set_schedule(self.tmpdir, content)
-        result = blocklist.read_domains_schedule(now_min=12 * 60)
-        self.assertEqual(result, ["dup.com"])
-
-    def test_returns_sorted_domains(self):
-        _set_schedule(self.tmpdir, "# 09:00-17:00\nzebra.com\napple.com\n")
-        result = blocklist.read_domains_schedule(now_min=12 * 60)
-        self.assertEqual(result, ["apple.com", "zebra.com"])
-
-    def test_normalises_to_lowercase(self):
-        _set_schedule(self.tmpdir, "# 09:00-17:00\nReddit.COM\n")
-        result = blocklist.read_domains_schedule(now_min=12 * 60)
-        self.assertEqual(result, ["reddit.com"])
-
-
 class TestScheduleTierApply(InTempDir):
     """apply() integrates the schedule tier with /etc/hosts and the log trail."""
 
@@ -833,63 +711,6 @@ class TestDoHSinkholing(InTempDir):
 # ---------------------------------------------------------------------------
 # read_schedule_windows
 # ---------------------------------------------------------------------------
-
-class TestReadScheduleWindows(InTempDir):
-    """read_schedule_windows returns all windows with their domains and active state."""
-
-    def test_missing_file_returns_empty(self):
-        blocklist.blocklist_schedule_file = os.path.join(self.tmpdir, "missing.txt")
-        self.assertEqual(blocklist.read_schedule_windows(now_min=12 * 60), [])
-
-    def test_none_path_returns_empty(self):
-        blocklist.blocklist_schedule_file = None
-        self.assertEqual(blocklist.read_schedule_windows(now_min=12 * 60), [])
-
-    def test_returns_active_window(self):
-        _set_schedule(self.tmpdir, "# 09:00-17:00\nreddit.com\n")
-        windows = blocklist.read_schedule_windows(now_min=12 * 60)
-        self.assertEqual(len(windows), 1)
-        start, end, domains, is_active = windows[0]
-        self.assertEqual(start, 9 * 60)
-        self.assertEqual(end, 17 * 60)
-        self.assertEqual(domains, ["reddit.com"])
-        self.assertTrue(is_active)
-
-    def test_returns_inactive_window(self):
-        _set_schedule(self.tmpdir, "# 09:00-17:00\nreddit.com\n")
-        windows = blocklist.read_schedule_windows(now_min=20 * 60)
-        self.assertEqual(len(windows), 1)
-        _, _, domains, is_active = windows[0]
-        self.assertEqual(domains, ["reddit.com"])
-        self.assertFalse(is_active)
-
-    def test_returns_all_windows_not_just_active(self):
-        content = "# 09:00-17:00\nwork.com\n\n# 22:00-08:00\nnight.com\n"
-        _set_schedule(self.tmpdir, content)
-        # At 12:00 only the first window is active, but both are returned.
-        windows = blocklist.read_schedule_windows(now_min=12 * 60)
-        self.assertEqual(len(windows), 2)
-        _, _, domains0, active0 = windows[0]
-        _, _, domains1, active1 = windows[1]
-        self.assertEqual(domains0, ["work.com"])
-        self.assertTrue(active0)
-        self.assertEqual(domains1, ["night.com"])
-        self.assertFalse(active1)
-
-    def test_empty_windows_omitted(self):
-        # A window header with no domains under it should not appear.
-        _set_schedule(self.tmpdir, "# 09:00-17:00\n# 22:00-08:00\nnight.com\n")
-        windows = blocklist.read_schedule_windows(now_min=12 * 60)
-        self.assertEqual(len(windows), 1)
-        self.assertEqual(windows[0][1], 8 * 60)  # only the 22:00-08:00 window
-
-    def test_domains_before_first_header_ignored(self):
-        content = "orphan.com\n# 09:00-17:00\nvalid.com\n"
-        _set_schedule(self.tmpdir, content)
-        windows = blocklist.read_schedule_windows(now_min=12 * 60)
-        self.assertEqual(len(windows), 1)
-        self.assertNotIn("orphan.com", windows[0][2])
-
 
 if __name__ == "__main__":
     unittest.main()

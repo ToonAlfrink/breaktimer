@@ -334,6 +334,56 @@ class TestActiveScheduleItems(unittest.TestCase):
         self.assertEqual(result, ["aa", "mm", "zz"])
 
 
+class TestReadItems(unittest.TestCase):
+    """status.read_items() — the shared flat-file reader used by blocklist and app_blocking."""
+
+    def _write(self, content):
+        self._tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+        self._tmp.write(content)
+        self._tmp.close()
+        return self._tmp.name
+
+    def tearDown(self):
+        if hasattr(self, "_tmp"):
+            try:
+                os.unlink(self._tmp.name)
+            except OSError:
+                pass
+
+    def test_none_path(self):
+        self.assertEqual(status.read_items(None), [])
+
+    def test_missing_file(self):
+        self.assertEqual(status.read_items("/nonexistent/path.txt"), [])
+
+    def test_empty_file(self):
+        self.assertEqual(status.read_items(self._write("")), [])
+
+    def test_basic_items(self):
+        self.assertEqual(status.read_items(self._write("steam\ndiscord\nspotify\n")),
+                         ["discord", "spotify", "steam"])
+
+    def test_skips_comments(self):
+        self.assertEqual(status.read_items(self._write("# comment\nsteam\n# another\n")),
+                         ["steam"])
+
+    def test_skips_blank_lines(self):
+        self.assertEqual(status.read_items(self._write("\nsteam\n\ndiscord\n\n")),
+                         ["discord", "steam"])
+
+    def test_lowercased(self):
+        self.assertEqual(status.read_items(self._write("Steam\nDISCORD\nSpotify\n")),
+                         ["discord", "spotify", "steam"])
+
+    def test_deduplication(self):
+        self.assertEqual(status.read_items(self._write("steam\nsteam\nSteam\n")),
+                         ["steam"])
+
+    def test_sorted_output(self):
+        self.assertEqual(status.read_items(self._write("zsh\nabc\nmiddle\n")),
+                         ["abc", "middle", "zsh"])
+
+
 class TestNoCommandChannel(unittest.TestCase):
     """Pin the invariant: status.py has no IPC surface for time extension.
 

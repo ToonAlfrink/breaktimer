@@ -78,14 +78,14 @@ def cmd_blocklist():
     def _fmt_apps(names):
         return [f"    {n}  →  SIGTERM" for n in names]
 
-    always   = blocklist.read_domains()
-    active   = blocklist.read_domains_active()
-    strict_  = blocklist.read_domains_strict()
-    sched_windows      = blocklist.read_schedule_windows()
-    apps_always        = app_blocking.read_names()
-    apps_active        = app_blocking.read_names_active()
-    apps_strict        = app_blocking.read_names_strict()
-    apps_sched_windows = app_blocking.read_schedule_windows()
+    always   = status.read_items(blocklist.blocklist_file)
+    active   = status.read_items(blocklist.blocklist_active_file)
+    strict_  = status.read_items(blocklist.blocklist_strict_file)
+    sched_windows      = status.parse_schedule_file(blocklist.blocklist_schedule_file)
+    apps_always        = status.read_items(app_blocking.app_blocklist_file)
+    apps_active        = status.read_items(app_blocking.app_blocklist_active_file)
+    apps_strict        = status.read_items(app_blocking.app_blocklist_strict_file)
+    apps_sched_windows = status.parse_schedule_file(app_blocking.app_blocklist_schedule_file)
 
     nothing = not (always or active or strict_ or sched_windows or
                    apps_always or apps_active or apps_strict or apps_sched_windows)
