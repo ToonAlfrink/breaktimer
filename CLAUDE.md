@@ -69,16 +69,23 @@ Three independent processes bridged by a live status file:
   - `blocklist-strict.txt` — additionally blocked when daily refill is gone (day-is-over
     enforcement: everything distraction-worthy locked down once the daily limit is hit)
   - `blocklist-schedule.txt` — blocked during configured `# HH:MM-HH:MM` windows
-- `app_blocking.py` — sends SIGTERM to running processes (gaming clients, media players,
-  social apps) matching tier-based name lists. Same four-tier structure as `blocklist.py`;
-  same `apply(is_active, strict)` interface; dispatched alongside domain blocking every
-  adjustment tick. Complements `/etc/hosts` blocking since DNS-over-HTTPS in modern
-  browsers bypasses host-file sinkholes. Each kill is logged with process name, PID, and
-  triggering tier (why-it-acted trail). Files in `STATE_DIR`:
+- `app_blocking.py` — sends SIGTERM→SIGKILL (5 s grace) to running processes (gaming
+  clients, media players, social apps) matching tier-based name lists. Same four-tier
+  structure as `blocklist.py`; same `apply(is_active, strict)` interface; dispatched
+  alongside domain blocking every tick. Files in `STATE_DIR`:
   - `blocklist-apps.txt` — always killed
   - `blocklist-apps-active.txt` — killed during work sessions
   - `blocklist-apps-strict.txt` — killed when daily refill is gone
   - `blocklist-apps-schedule.txt` — killed during configured time windows
+- `firewall.py` — nftables-based firewall rules that block outbound TCP/UDP connections
+  to well-known DoH server IPs (Cloudflare 1.1.1.1, Google 8.8.8.8, Quad9 9.9.9.9,
+  etc.) on ports 443 and 853. Closes the one bypass vector that `/etc/hosts` domain
+  sinkholing cannot cover: browsers with hard-coded DoH IPs that skip DNS lookup
+  entirely. Uses the same `apply(is_active, strict)` / `cleanup()` interface; applied
+  every tick (1 Hz); detects external table deletion and restores rules immediately.
+  Requires `AmbientCapabilities=CAP_NET_ADMIN` in `breaktimer-core.service` (already
+  set). Degrades gracefully if `nft` is absent or permissions are denied: logs once,
+  stays quiet, `/etc/hosts` sinkholing still active. Logger: `breaktimer.firewall`.
 
 Runtime logs: `journalctl --user -u breaktimer-{core,ambient,web}.service`. The core
 keeps a **why-it-acted trail** there via the `logging` module (`breaktimer.{core,
@@ -98,7 +105,9 @@ cover the screen/pointer overrides (and that each logs its cause once);
 `test_blocklist.py` covers the four-tier `/etc/hosts` blocking (read, splice,
 apply, tier activation, log trail, and the integration dispatch);
 `test_app_blocking.py` covers the four-tier process blocking (name parsing, schedule
-windows, tier activation, kill dispatch, and the log trail). Run before and
+windows, tier activation, kill dispatch, and the log trail);
+`test_firewall.py` covers the nftables DoH-IP-blocking module (install, no-op,
+tamper detection, graceful degradation, cleanup, script content, log trail). Run before and
 after any change to the core:
 
 ```bash

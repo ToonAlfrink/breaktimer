@@ -13,6 +13,7 @@ import status
 from status import SECONDS_PER_MINUTE, today_str
 import app_blocking
 import blocklist
+import firewall
 from brightness_control import set_brightness_by_fraction, start_external_display_detection
 from mouse_sensitivity_control import set_sensitivity_by_fraction, read_original_sensitivity, restore_sensitivity
 
@@ -401,11 +402,12 @@ class TimerLoop:
         return False
     
     def _apply_blocking(self):
-        """Dispatch domain/app blocking every tick (1 Hz) to close the tamper window."""
+        """Dispatch domain/app/firewall blocking every tick (1 Hz) to close the tamper window."""
         is_active = self.state.is_active
         strict = self._refill_multiplier() <= 0
         self._dispatch(lambda: blocklist.apply(is_active=is_active, strict=strict))
         self._dispatch(lambda: app_blocking.apply(is_active=is_active, strict=strict))
+        self._dispatch(lambda: firewall.apply(is_active=is_active, strict=strict))
 
     def _apply_hardware_adjustments(self, remaining_fraction, current_loop_time):
         """Dispatch slow hardware side effects (brightness, sensitivity) every 10 s."""
@@ -615,6 +617,7 @@ def main():
     finally:
         activity_monitor.stop()
         restore_sensitivity(original_sensitivity)
+        firewall.cleanup()
 
 if __name__ == "__main__":
     main() 

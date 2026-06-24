@@ -11,6 +11,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/etc/hosts
 NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 
 [Install]
 WantedBy=default.target

@@ -781,7 +781,7 @@ class TestDispatchDecoupling(unittest.TestCase):
         loop = make_loop(3600)
         loop._dispatch = seen.append
         loop._apply_blocking()
-        self.assertEqual(len(seen), 2)  # blocklist + app_blocking
+        self.assertEqual(len(seen), 3)  # blocklist + app_blocking + firewall
 
     def test_hardware_adjustments_gated_at_10s(self):
         """Hardware adjustments must be skipped when called within the 10s interval."""
@@ -801,7 +801,7 @@ class TestDispatchDecoupling(unittest.TestCase):
         # Call twice in rapid succession — both must dispatch
         loop._apply_blocking()
         loop._apply_blocking()
-        self.assertEqual(len(seen), 4, "blocking must fire every tick, not just every 10s")
+        self.assertEqual(len(seen), 6, "blocking must fire every tick, not just every 10s")
 
 
 class TestPhoneActivity(unittest.TestCase):

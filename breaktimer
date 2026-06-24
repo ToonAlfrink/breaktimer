@@ -76,7 +76,7 @@ def cmd_blocklist():
         return lines
 
     def _fmt_apps(names):
-        return [f"    {n}  →  SIGTERM" for n in names]
+        return [f"    {n}  →  SIGTERM→SIGKILL" for n in names]
 
     always   = status.read_items(blocklist.blocklist_file)
     active   = status.read_items(blocklist.blocklist_active_file)
