@@ -201,8 +201,7 @@ class _Server(socketserver.ThreadingMixIn, HTTPServer):
 
 
 def main():
-    logging.basicConfig(level=logging.INFO,
-                        format="%(levelname)s %(name)s: %(message)s")
+    status.setup_logging()
 
     parser = argparse.ArgumentParser(description="breaktimer HTTP status bridge")
     parser.add_argument("--host", default="0.0.0.0",

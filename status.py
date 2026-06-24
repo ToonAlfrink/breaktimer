@@ -7,6 +7,7 @@ and vanishes at logout. Either process can restart without the other.
 """
 import fcntl
 import json
+import logging
 import os
 import re
 import time
@@ -15,6 +16,32 @@ from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 
 SECONDS_PER_MINUTE = 60
+# Phone-ping staleness threshold: a ping older than this is treated as gone
+# (phone was backgrounded or the page closed). Lives here alongside
+# write_phone_ping() / read_phone_ping() — the three form a single contract.
+PHONE_PING_MAX_AGE_SECONDS = 10
+
+
+def setup_logging() -> None:
+    """Configure the root logger for breaktimer processes.
+
+    journald already stamps time and unit, so the format stays lean.
+    Call once at process startup (main.py, web.py).
+    """
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+
+def atomic_write(path: str, content: str, mode: int = 0o600) -> None:
+    """Write content to path atomically (write temp file then rename into place).
+
+    Uses O_CREAT with explicit mode bits so a newly-created file gets the
+    right permissions before any reader can see it. Raises OSError on failure.
+    """
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+    os.replace(tmp, path)
 
 
 def _runtime_dir():
@@ -53,12 +80,7 @@ class Snapshot:
 
     def publish(self):
         """Atomically write this snapshot to the runtime status file."""
-        path = status_path()
-        tmp = path + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(asdict(self), f)
-        os.replace(tmp, path)
+        atomic_write(status_path(), json.dumps(asdict(self)))
 
     @classmethod
     def read(cls, max_age_seconds=5.0):
@@ -93,12 +115,7 @@ def phone_activity_path():
 
 def write_phone_ping():
     """Atomically record the current wall-clock time as a phone activity ping."""
-    path = phone_activity_path()
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump({"last_ping": time.time()}, f)
-    os.replace(tmp, path)
+    atomic_write(phone_activity_path(), json.dumps({"last_ping": time.time()}))
 
 
 def read_phone_ping():

@@ -35,13 +35,6 @@ class TimerConfig:
     daily_budget_seconds: float
     daily_limit_seconds: float
 
-# Phone pings arrive every 2 s while the mobile page is foregrounded.  A ping
-# older than this is treated as gone — the phone was backgrounded or the page
-# closed.  Generous enough to absorb a missed poll or two, tight enough that
-# leaving the phone open on a desk overnight never counts as work.
-PHONE_PING_MAX_AGE_SECONDS = 10
-
-
 def _prune_daily_work_totals(totals):
     """Drop entries older than _HISTORY_DAYS to keep the dict bounded."""
     cutoff = (date.today() - timedelta(days=_HISTORY_DAYS)).isoformat()
@@ -107,11 +100,7 @@ class TimerState:
         """Atomically persist to path (write temp → rename)."""
         self.last_saved_time = time.time()
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-        tmp = path + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, 'w') as f:
-            json.dump(self.to_dict(), f, indent=4)
-        os.replace(tmp, path)
+        status.atomic_write(path, json.dumps(self.to_dict(), indent=4))
 
     @classmethod
     def load(cls, path: str) -> "TimerState | None":
@@ -320,7 +309,7 @@ class TimerLoop:
         A ping older than PHONE_PING_MAX_AGE_SECONDS is ignored — the page was
         backgrounded or the connection dropped; phone use has stopped."""
         last_ping = status.read_phone_ping()
-        if last_ping is not None and time.time() - last_ping < PHONE_PING_MAX_AGE_SECONDS:
+        if last_ping is not None and time.time() - last_ping < status.PHONE_PING_MAX_AGE_SECONDS:
             self.activity_monitor.set_last_activity_time(time.monotonic())
 
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
@@ -568,8 +557,7 @@ def initialize_state(args, mana_max_seconds, state_file):
     return state
 
 def main():
-    # journald already stamps time and unit, so keep the line lean.
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    status.setup_logging()
 
     state_dir = status.state_dir()
     state_file = os.path.join(state_dir, "state.json")

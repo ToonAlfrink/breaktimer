@@ -127,12 +127,7 @@ def is_paused():
 
 def pause(seconds, level=100):
     """Suspend brightness adjustments for `seconds`, parking displays at `level`%."""
-    path = status.brightness_pause_path()
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(str(time.time() + seconds))
-    os.replace(tmp, path)
+    status.atomic_write(status.brightness_pause_path(), str(time.time() + seconds))
     _apply_to_all_displays(level)
 
 

@@ -838,7 +838,7 @@ class TestPhoneActivity(unittest.TestCase):
         old_activity = monitor.get_last_activity_time()
         with tempfile.TemporaryDirectory() as tmpdir, \
                 mock.patch("status._runtime_dir", return_value=tmpdir):
-            self._with_ping(tmpdir, age_seconds=main.PHONE_PING_MAX_AGE_SECONDS + 1)
+            self._with_ping(tmpdir, age_seconds=status.PHONE_PING_MAX_AGE_SECONDS + 1)
             loop._check_phone_activity()
         self.assertAlmostEqual(monitor.get_last_activity_time(), old_activity, places=3)
 
