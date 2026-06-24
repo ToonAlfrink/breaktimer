@@ -18,11 +18,11 @@ CONFIG_FILES = (CONFIG_DEFAULT_FILE, CONFIG_TOUCHPAD_FILE)
 
 def _read_speed_from_file(path):
     """Return current speed value from a given COSMIC input config file, or None."""
-    if not os.path.exists(path):
+    try:
+        with open(path) as f:
+            content = f.read()
+    except OSError:
         return None
-
-    with open(path, "r") as f:
-        content = f.read()
 
     match = re.search(r"speed:\s*(-?[\d.]+)", content)
     if not match:

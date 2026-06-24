@@ -70,7 +70,7 @@ def _notify(body, urgency="normal"):
 class TimerState:
     remaining_time: float
     daily_work_totals: dict = field(default_factory=dict)
-    last_saved_time: float = None
+    last_saved_time: float | None = None
     is_active: bool = True
 
     def to_dict(self):
@@ -523,13 +523,13 @@ def parse_arguments():
         "--start-minutes",
         type=float,
         default=None,
-        help="Override starting time in minutes (default: starts at --deplete-minutes cap)."
+        help="Override starting time in minutes (default: starts at --max-minutes cap)."
     )
     parser.add_argument(
-        "--deplete-minutes",
+        "--max-minutes",
         type=float,
         default=60,
-        help="Bar cap and minutes to deplete from full (X)."
+        help="Bar cap in minutes (default: 60)."
     )
     parser.add_argument(
         "--replenish-minutes",
@@ -550,8 +550,8 @@ def parse_arguments():
         help="Daily work total at which idle refill stops entirely (default 10h)."
     )
     args = parser.parse_args()
-    if args.deplete_minutes <= 0 or args.replenish_minutes <= 0:
-        parser.error("--deplete-minutes and --replenish-minutes must be positive")
+    if args.max_minutes <= 0 or args.replenish_minutes <= 0:
+        parser.error("--max-minutes and --replenish-minutes must be positive")
     if not 0 < args.daily_budget_minutes < args.daily_limit_minutes:
         parser.error("--daily-budget-minutes must be positive and below --daily-limit-minutes")
     return args
@@ -582,7 +582,7 @@ def main():
     bc = brightness_control.BrightnessController()
     mc = mouse_sensitivity_control.MouseController()
     cfg = TimerConfig(
-        max_seconds=args.deplete_minutes * SECONDS_PER_MINUTE,
+        max_seconds=args.max_minutes * SECONDS_PER_MINUTE,
         replenish_seconds=args.replenish_minutes * SECONDS_PER_MINUTE,
         daily_budget_seconds=args.daily_budget_minutes * SECONDS_PER_MINUTE,
         daily_limit_seconds=args.daily_limit_minutes * SECONDS_PER_MINUTE,
