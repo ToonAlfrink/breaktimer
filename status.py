@@ -229,6 +229,83 @@ def fmt_window(start_min: int, end_min: int) -> str:
     )
 
 
+def parse_schedule_file(
+    path: str | None, now_min: int | None = None
+) -> list[tuple[int, int, list[str], bool]]:
+    """Parse a schedule file with # HH:MM-HH:MM window headers.
+
+    Returns (start_min, end_min, items, is_active_now) for each non-empty window.
+    Items are lowercased strings. Lines before the first window header are ignored.
+    Empty windows (no items) are omitted.
+
+    Used by blocklist.py and app_blocking.py for domain and app-name blocking.
+    The file format is shared: one item per line, time windows gate them.
+    """
+    if not path:
+        return []
+    if now_min is None:
+        now_min = minutes_since_midnight()
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+
+    result: list[tuple[int, int, list[str], bool]] = []
+    current_window: tuple[int, int] | None = None
+    current_items: list[str] = []
+    seen: set[str] = set()
+
+    def _flush():
+        if current_window is not None and current_items:
+            is_active = in_window(current_window[0], current_window[1], now_min)
+            result.append((current_window[0], current_window[1], list(current_items), is_active))
+
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        m = WINDOW_RE.match(stripped)
+        if m:
+            _flush()
+            current_items = []
+            seen = set()
+            sh, sm = m.group(1).split(":")
+            eh, em = m.group(2).split(":")
+            current_window = (int(sh) * 60 + int(sm), int(eh) * 60 + int(em))
+            continue
+        if stripped.startswith("#"):
+            continue
+        if current_window is None:
+            continue
+        item = stripped.lower()
+        if item not in seen:
+            seen.add(item)
+            current_items.append(item)
+
+    _flush()
+    return result
+
+
+def active_schedule_items(
+    path: str | None, now_min: int | None = None
+) -> list[str]:
+    """Return items from schedule-file windows that are currently active.
+
+    Filters parse_schedule_file() to active windows, deduplicates across overlapping
+    windows, and returns a sorted list. Used by blocklist.py and app_blocking.py.
+    """
+    seen: set[str] = set()
+    items: list[str] = []
+    for _, _, window_items, is_active in parse_schedule_file(path, now_min):
+        if is_active:
+            for item in window_items:
+                if item not in seen:
+                    seen.add(item)
+                    items.append(item)
+    return sorted(items)
+
+
 # Shared mana-bar palette: bar fraction → colour (black → red → yellow → cyan → blue).
 COLOR_STOPS = (
     (0.00, 130, 0, 0),

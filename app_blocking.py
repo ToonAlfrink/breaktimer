@@ -59,74 +59,6 @@ def _read_names(path: str | None) -> list[str]:
     return sorted(names)
 
 
-def _read_file_all_windows(
-    path: str | None, now_min: int | None = None
-) -> list[tuple[int, int, list[str], bool]]:
-    """Parse a schedule file and return all windows with their names and active state.
-
-    Each entry is (start_min, end_min, names, is_active_now). Windows with no
-    names are omitted. Names before the first window header are ignored.
-    """
-    if not path:
-        return []
-    if now_min is None:
-        now_min = status.minutes_since_midnight()
-    try:
-        with open(path) as f:
-            lines = f.readlines()
-    except OSError:
-        return []
-
-    result: list[tuple[int, int, list[str], bool]] = []
-    current_window: tuple[int, int] | None = None
-    current_names: list[str] = []
-    seen: set[str] = set()
-
-    def _flush():
-        if current_window is not None and current_names:
-            is_active = status.in_window(current_window[0], current_window[1], now_min)
-            result.append((current_window[0], current_window[1], list(current_names), is_active))
-
-    for raw in lines:
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        m = status.WINDOW_RE.match(stripped)
-        if m:
-            _flush()
-            current_names = []
-            seen = set()
-            sh, sm = m.group(1).split(":")
-            eh, em = m.group(2).split(":")
-            current_window = (int(sh) * 60 + int(sm), int(eh) * 60 + int(em))
-            continue
-        if stripped.startswith("#"):
-            continue
-        if current_window is None:
-            continue
-        name = stripped.lower()
-        if name not in seen:
-            seen.add(name)
-            current_names.append(name)
-
-    _flush()
-    return result
-
-
-def _read_names_scheduled(path: str | None, now_min: int | None = None) -> list[str]:
-    """Parse a schedule file and return app names whose window is currently active.
-
-    Names before the first window header are ignored.
-    """
-    seen: set[str] = set()
-    names: list[str] = []
-    for _, _, window_names, is_active in _read_file_all_windows(path, now_min):
-        if is_active:
-            for n in window_names:
-                if n not in seen:
-                    seen.add(n)
-                    names.append(n)
-    return sorted(names)
 
 
 def _find_pids(name: str) -> list[int]:
@@ -173,7 +105,7 @@ def read_names_strict() -> list[str]:
 
 def read_names_schedule(now_min: int | None = None) -> list[str]:
     """Return schedule-tier app names from blocklist-apps-schedule.txt active right now."""
-    return _read_names_scheduled(app_blocklist_schedule_file, now_min)
+    return status.active_schedule_items(app_blocklist_schedule_file, now_min)
 
 
 def read_schedule_windows(now_min: int | None = None) -> list[tuple[int, int, list[str], bool]]:
@@ -183,7 +115,7 @@ def read_schedule_windows(now_min: int | None = None) -> list[tuple[int, int, li
     windows regardless of whether they are currently active — useful for
     displaying the full schedule configuration in 'breaktimer blocklist'.
     """
-    return _read_file_all_windows(app_blocklist_schedule_file, now_min)
+    return status.parse_schedule_file(app_blocklist_schedule_file, now_min)
 
 
 def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = None) -> None:
@@ -199,7 +131,7 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     always_names   = set(_read_names(app_blocklist_file))
     active_names   = set(_read_names(app_blocklist_active_file)) if is_active else set()
     strict_names   = set(_read_names(app_blocklist_strict_file)) if strict else set()
-    schedule_names = set(_read_names_scheduled(app_blocklist_schedule_file, _now_min))
+    schedule_names = set(status.active_schedule_items(app_blocklist_schedule_file, _now_min))
 
     # Map each name to the tier(s) that triggered it (for the log).
     tier_map: dict[str, list[str]] = {}

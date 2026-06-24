@@ -199,6 +199,141 @@ class TestFmtWindow(unittest.TestCase):
         self.assertEqual(status.fmt_window(9 * 60 + 30, 17 * 60 + 45), "09:30-17:45")
 
 
+class TestParseScheduleFile(unittest.TestCase):
+    """status.parse_schedule_file: canonical schedule-file parser used by blocklist and app_blocking."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, content):
+        path = os.path.join(self._tmp.name, "schedule.txt")
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+
+    def test_none_path_returns_empty(self):
+        self.assertEqual(status.parse_schedule_file(None, now_min=600), [])
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(status.parse_schedule_file("/nonexistent/schedule.txt", now_min=600), [])
+
+    def test_empty_file_returns_empty(self):
+        path = self._write("")
+        self.assertEqual(status.parse_schedule_file(path, now_min=600), [])
+
+    def test_active_window_returns_entry(self):
+        path = self._write("# 09:00-17:00\nreddit.com\n")
+        result = status.parse_schedule_file(path, now_min=12 * 60)
+        self.assertEqual(len(result), 1)
+        start, end, items, is_active = result[0]
+        self.assertEqual(start, 9 * 60)
+        self.assertEqual(end, 17 * 60)
+        self.assertEqual(items, ["reddit.com"])
+        self.assertTrue(is_active)
+
+    def test_inactive_window_returns_entry_marked_inactive(self):
+        path = self._write("# 09:00-17:00\nreddit.com\n")
+        result = status.parse_schedule_file(path, now_min=20 * 60)
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0][3])
+
+    def test_items_lowercased(self):
+        path = self._write("# 09:00-17:00\nReddit.COM\nSTEAM\n")
+        result = status.parse_schedule_file(path, now_min=12 * 60)
+        self.assertEqual(result[0][2], ["reddit.com", "steam"])
+
+    def test_items_before_first_header_ignored(self):
+        path = self._write("orphan\n# 09:00-17:00\nvalid\n")
+        result = status.parse_schedule_file(path, now_min=12 * 60)
+        self.assertEqual(len(result), 1)
+        self.assertNotIn("orphan", result[0][2])
+
+    def test_empty_window_omitted(self):
+        path = self._write("# 09:00-17:00\n# 22:00-08:00\nnight\n")
+        result = status.parse_schedule_file(path, now_min=12 * 60)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][1], 8 * 60)  # only 22:00-08:00
+
+    def test_all_windows_returned_not_just_active(self):
+        path = self._write("# 09:00-17:00\nwork\n\n# 22:00-08:00\nnight\n")
+        result = status.parse_schedule_file(path, now_min=12 * 60)
+        self.assertEqual(len(result), 2)
+        self.assertTrue(result[0][3])   # 09:00-17:00 active at noon
+        self.assertFalse(result[1][3])  # 22:00-08:00 inactive at noon
+
+    def test_wraparound_window_active_at_night(self):
+        path = self._write("# 22:00-08:00\nnight\n")
+        result = status.parse_schedule_file(path, now_min=23 * 60)
+        self.assertTrue(result[0][3])
+
+    def test_wraparound_window_active_early_morning(self):
+        path = self._write("# 22:00-08:00\nnight\n")
+        result = status.parse_schedule_file(path, now_min=3 * 60)
+        self.assertTrue(result[0][3])
+
+    def test_deduplication_within_window(self):
+        path = self._write("# 09:00-17:00\ndup\ndup\nDUP\n")
+        result = status.parse_schedule_file(path, now_min=12 * 60)
+        self.assertEqual(result[0][2], ["dup"])
+
+    def test_non_window_comments_skipped(self):
+        path = self._write("# 09:00-17:00\nreddit\n# just a note\nhn\n")
+        result = status.parse_schedule_file(path, now_min=12 * 60)
+        # insertion order preserved within a window (not sorted — that's active_schedule_items)
+        self.assertEqual(result[0][2], ["reddit", "hn"])
+
+    def test_blank_lines_skipped(self):
+        path = self._write("# 09:00-17:00\n\nreddit\n\n")
+        result = status.parse_schedule_file(path, now_min=12 * 60)
+        self.assertEqual(result[0][2], ["reddit"])
+
+
+class TestActiveScheduleItems(unittest.TestCase):
+    """status.active_schedule_items: filters parse_schedule_file to active items."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, content):
+        path = os.path.join(self._tmp.name, "schedule.txt")
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+
+    def test_none_path_returns_empty(self):
+        self.assertEqual(status.active_schedule_items(None, now_min=600), [])
+
+    def test_active_window_returns_items(self):
+        path = self._write("# 09:00-17:00\nzebra\napple\n")
+        result = status.active_schedule_items(path, now_min=12 * 60)
+        self.assertEqual(result, ["apple", "zebra"])  # sorted
+
+    def test_inactive_window_returns_empty(self):
+        path = self._write("# 09:00-17:00\nreddit\n")
+        self.assertEqual(status.active_schedule_items(path, now_min=20 * 60), [])
+
+    def test_deduplication_across_overlapping_active_windows(self):
+        path = self._write("# 08:00-12:00\nsteam\n\n# 08:00-17:00\nsteam\ndiscord\n")
+        result = status.active_schedule_items(path, now_min=10 * 60)
+        self.assertEqual(result, ["discord", "steam"])
+
+    def test_only_active_windows_contribute(self):
+        path = self._write("# 09:00-17:00\nwork\n\n# 22:00-08:00\nnight\n")
+        result = status.active_schedule_items(path, now_min=12 * 60)
+        self.assertEqual(result, ["work"])
+
+    def test_sorted_output(self):
+        path = self._write("# 09:00-17:00\nzz\naa\nmm\n")
+        result = status.active_schedule_items(path, now_min=12 * 60)
+        self.assertEqual(result, ["aa", "mm", "zz"])
+
+
 class TestNoCommandChannel(unittest.TestCase):
     """Pin the invariant: status.py has no IPC surface for time extension.
 

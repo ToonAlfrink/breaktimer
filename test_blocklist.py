@@ -532,45 +532,6 @@ class TestBlocklistActionTrail(InTempDir):
 # Schedule tier
 # ---------------------------------------------------------------------------
 
-class TestInWindow(unittest.TestCase):
-    """status.in_window: same-day, wrap-around, and edge cases."""
-
-    def test_same_day_window_inside(self):
-        self.assertTrue(status.in_window(9 * 60, 17 * 60, 12 * 60))
-
-    def test_same_day_window_at_start(self):
-        self.assertTrue(status.in_window(9 * 60, 17 * 60, 9 * 60))
-
-    def test_same_day_window_at_end_exclusive(self):
-        self.assertFalse(status.in_window(9 * 60, 17 * 60, 17 * 60))
-
-    def test_same_day_window_before(self):
-        self.assertFalse(status.in_window(9 * 60, 17 * 60, 8 * 60))
-
-    def test_same_day_window_after(self):
-        self.assertFalse(status.in_window(9 * 60, 17 * 60, 18 * 60))
-
-    def test_wraparound_window_late_night(self):
-        # 22:00-08:00 — 23:00 is inside
-        self.assertTrue(status.in_window(22 * 60, 8 * 60, 23 * 60))
-
-    def test_wraparound_window_early_morning(self):
-        # 22:00-08:00 — 03:00 is inside
-        self.assertTrue(status.in_window(22 * 60, 8 * 60, 3 * 60))
-
-    def test_wraparound_window_at_start(self):
-        self.assertTrue(status.in_window(22 * 60, 8 * 60, 22 * 60))
-
-    def test_wraparound_window_at_end_exclusive(self):
-        self.assertFalse(status.in_window(22 * 60, 8 * 60, 8 * 60))
-
-    def test_wraparound_window_midday_outside(self):
-        self.assertFalse(status.in_window(22 * 60, 8 * 60, 12 * 60))
-
-    def test_zero_length_window_never_active(self):
-        self.assertFalse(status.in_window(9 * 60, 9 * 60, 9 * 60))
-
-
 class TestScheduleTier(InTempDir):
     """Schedule tier: time-window-gated domain blocking."""
 

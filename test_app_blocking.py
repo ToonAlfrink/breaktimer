@@ -14,32 +14,6 @@ def _write(path, content):
         f.write(content)
 
 
-class TestInWindow(unittest.TestCase):
-    def test_same_day_inside(self):
-        self.assertTrue(status.in_window(540, 1020, 600))   # 09:00–17:00, now 10:00
-
-    def test_same_day_at_start(self):
-        self.assertTrue(status.in_window(540, 1020, 540))   # exactly at start
-
-    def test_same_day_at_end_exclusive(self):
-        self.assertFalse(status.in_window(540, 1020, 1020)) # end is exclusive
-
-    def test_same_day_outside(self):
-        self.assertFalse(status.in_window(540, 1020, 1200)) # 20:00 not in 09:00–17:00
-
-    def test_wraparound_inside_evening(self):
-        self.assertTrue(status.in_window(1320, 480, 1400))  # 22:00–08:00, now 23:20
-
-    def test_wraparound_inside_morning(self):
-        self.assertTrue(status.in_window(1320, 480, 60))    # 22:00–08:00, now 01:00
-
-    def test_wraparound_outside(self):
-        self.assertFalse(status.in_window(1320, 480, 600))  # 22:00–08:00, now 10:00
-
-    def test_zero_length_never_active(self):
-        self.assertFalse(status.in_window(600, 600, 600))
-
-
 class TestReadNames(unittest.TestCase):
     def test_none_path(self):
         self.assertEqual(app_blocking._read_names(None), [])
@@ -112,6 +86,8 @@ class TestReadNames(unittest.TestCase):
 
 
 class TestReadNamesScheduled(unittest.TestCase):
+    """Active schedule-name lookup — now backed by status.active_schedule_items."""
+
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
         self.path = self.tmp.name
@@ -119,55 +95,47 @@ class TestReadNamesScheduled(unittest.TestCase):
     def tearDown(self):
         os.unlink(self.path)
 
+    def _active(self, now_min):
+        return status.active_schedule_items(self.path, now_min=now_min)
+
     def test_no_window_header_ignored(self):
         _write(self.path, "steam\ndiscord\n")
-        # Names before first header are ignored.
-        self.assertEqual(app_blocking._read_names_scheduled(self.path, now_min=600), [])
+        self.assertEqual(self._active(600), [])
 
     def test_window_active(self):
         _write(self.path, "# 09:00-17:00\nsteam\ndiscord\n")
-        result = app_blocking._read_names_scheduled(self.path, now_min=600)  # 10:00
-        self.assertEqual(result, ["discord", "steam"])
+        self.assertEqual(self._active(600), ["discord", "steam"])
 
     def test_window_inactive(self):
         _write(self.path, "# 09:00-17:00\nsteam\n")
-        result = app_blocking._read_names_scheduled(self.path, now_min=1200)  # 20:00
-        self.assertEqual(result, [])
+        self.assertEqual(self._active(1200), [])
 
     def test_wraparound_window_evening(self):
         _write(self.path, "# 22:00-08:00\nspotify\n")
-        result = app_blocking._read_names_scheduled(self.path, now_min=1380)  # 23:00
-        self.assertEqual(result, ["spotify"])
+        self.assertEqual(self._active(1380), ["spotify"])
 
     def test_wraparound_window_morning(self):
         _write(self.path, "# 22:00-08:00\nspotify\n")
-        result = app_blocking._read_names_scheduled(self.path, now_min=60)   # 01:00
-        self.assertEqual(result, ["spotify"])
+        self.assertEqual(self._active(60), ["spotify"])
 
     def test_multiple_windows_only_active(self):
         _write(self.path, "# 09:00-12:00\nsteam\n\n# 18:00-20:00\ndiscord\n")
-        # 10:00 — first window active, second not
-        result = app_blocking._read_names_scheduled(self.path, now_min=600)
-        self.assertEqual(result, ["steam"])
-        # 19:00 — second window active, first not
-        result = app_blocking._read_names_scheduled(self.path, now_min=1140)
-        self.assertEqual(result, ["discord"])
+        self.assertEqual(self._active(600), ["steam"])
+        self.assertEqual(self._active(1140), ["discord"])
 
     def test_deduplication_across_windows(self):
         _write(self.path, "# 08:00-12:00\nsteam\n\n# 08:00-17:00\nsteam\ndiscord\n")
-        result = app_blocking._read_names_scheduled(self.path, now_min=600)  # 10:00
-        self.assertEqual(result, ["discord", "steam"])  # steam deduplicated
+        self.assertEqual(self._active(600), ["discord", "steam"])
 
     def test_missing_file(self):
-        self.assertEqual(app_blocking._read_names_scheduled("/nonexistent.txt", 600), [])
+        self.assertEqual(status.active_schedule_items("/nonexistent.txt", 600), [])
 
     def test_none_path(self):
-        self.assertEqual(app_blocking._read_names_scheduled(None, 600), [])
+        self.assertEqual(status.active_schedule_items(None, 600), [])
 
     def test_non_window_comment_skipped(self):
         _write(self.path, "# 09:00-17:00\nsteam\n# just a note\ndiscord\n")
-        result = app_blocking._read_names_scheduled(self.path, now_min=600)
-        self.assertEqual(result, ["discord", "steam"])
+        self.assertEqual(self._active(600), ["discord", "steam"])
 
 
 class TestFindPids(unittest.TestCase):

@@ -115,76 +115,6 @@ def _read_file_domains(path: str | None) -> list[str]:
     return sorted(domains)
 
 
-def _read_file_all_windows(
-    path: str | None, now_min: int | None = None
-) -> list[tuple[int, int, list[str], bool]]:
-    """Parse a schedule file and return all windows with their domains and active state.
-
-    Each entry is (start_min, end_min, domains, is_active_now). Windows that
-    contain no domains are omitted. Domains before the first window header are
-    ignored. Used both for blocking (filter to active windows) and for display
-    (show all windows with their active/inactive status).
-    """
-    if not path:
-        return []
-    if now_min is None:
-        now_min = status.minutes_since_midnight()
-    try:
-        with open(path) as f:
-            lines = f.readlines()
-    except OSError:
-        return []
-
-    result: list[tuple[int, int, list[str], bool]] = []
-    current_window: tuple[int, int] | None = None
-    current_domains: list[str] = []
-    seen: set[str] = set()
-
-    def _flush():
-        if current_window is not None and current_domains:
-            is_active = status.in_window(current_window[0], current_window[1], now_min)
-            result.append((current_window[0], current_window[1], list(current_domains), is_active))
-
-    for raw in lines:
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        m = status.WINDOW_RE.match(stripped)
-        if m:
-            _flush()
-            current_domains = []
-            seen = set()
-            sh, sm = m.group(1).split(":")
-            eh, em = m.group(2).split(":")
-            current_window = (int(sh) * 60 + int(sm), int(eh) * 60 + int(em))
-            continue
-        if stripped.startswith("#"):
-            continue
-        if current_window is None:
-            continue
-        d = stripped.lower()
-        if d not in seen:
-            seen.add(d)
-            current_domains.append(d)
-
-    _flush()
-    return result
-
-
-def _read_file_domains_scheduled(path: str | None, now_min: int | None = None) -> list[str]:
-    """Parse a schedule file and return domains whose window is currently active.
-
-    Domains that appear before the first window header are ignored.
-    """
-    seen: set[str] = set()
-    domains: list[str] = []
-    for _, _, window_domains, is_active in _read_file_all_windows(path, now_min):
-        if is_active:
-            for d in window_domains:
-                if d not in seen:
-                    seen.add(d)
-                    domains.append(d)
-    return sorted(domains)
 
 
 def read_domains() -> list[str]:
@@ -211,7 +141,7 @@ def read_domains_schedule(now_min: int | None = None) -> list[str]:
     now_min: minutes since midnight (0–1439). Pass an explicit value for testing;
     omit to use the current wall-clock time.
     """
-    return _read_file_domains_scheduled(blocklist_schedule_file, now_min)
+    return status.active_schedule_items(blocklist_schedule_file, now_min)
 
 
 def read_schedule_windows(now_min: int | None = None) -> list[tuple[int, int, list[str], bool]]:
@@ -221,7 +151,7 @@ def read_schedule_windows(now_min: int | None = None) -> list[tuple[int, int, li
     windows regardless of whether they are currently active — useful for
     displaying the full schedule configuration in 'breaktimer blocklist'.
     """
-    return _read_file_all_windows(blocklist_schedule_file, now_min)
+    return status.parse_schedule_file(blocklist_schedule_file, now_min)
 
 
 def _block_lines(domains: list[str]) -> str:
@@ -324,7 +254,7 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     always_domains   = set(_read_file_domains(blocklist_file))
     active_domains   = set(_read_file_domains(blocklist_active_file)) if is_active else set()
     strict_domains   = set(_read_file_domains(blocklist_strict_file)) if strict else set()
-    schedule_domains = set(_read_file_domains_scheduled(blocklist_schedule_file, _now_min))
+    schedule_domains = set(status.active_schedule_items(blocklist_schedule_file, _now_min))
 
     user_domains = always_domains | active_domains | strict_domains | schedule_domains
     # When any user-configured domains are blocked, also sinkhole well-known DoH
