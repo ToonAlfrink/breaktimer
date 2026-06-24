@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import call, patch
 
 import app_blocking
+import status
 
 
 def _write(path, content):
@@ -15,28 +16,28 @@ def _write(path, content):
 
 class TestInWindow(unittest.TestCase):
     def test_same_day_inside(self):
-        self.assertTrue(app_blocking._in_window(540, 1020, 600))   # 09:00–17:00, now 10:00
+        self.assertTrue(status.in_window(540, 1020, 600))   # 09:00–17:00, now 10:00
 
     def test_same_day_at_start(self):
-        self.assertTrue(app_blocking._in_window(540, 1020, 540))   # exactly at start
+        self.assertTrue(status.in_window(540, 1020, 540))   # exactly at start
 
     def test_same_day_at_end_exclusive(self):
-        self.assertFalse(app_blocking._in_window(540, 1020, 1020)) # end is exclusive
+        self.assertFalse(status.in_window(540, 1020, 1020)) # end is exclusive
 
     def test_same_day_outside(self):
-        self.assertFalse(app_blocking._in_window(540, 1020, 1200)) # 20:00 not in 09:00–17:00
+        self.assertFalse(status.in_window(540, 1020, 1200)) # 20:00 not in 09:00–17:00
 
     def test_wraparound_inside_evening(self):
-        self.assertTrue(app_blocking._in_window(1320, 480, 1400))  # 22:00–08:00, now 23:20
+        self.assertTrue(status.in_window(1320, 480, 1400))  # 22:00–08:00, now 23:20
 
     def test_wraparound_inside_morning(self):
-        self.assertTrue(app_blocking._in_window(1320, 480, 60))    # 22:00–08:00, now 01:00
+        self.assertTrue(status.in_window(1320, 480, 60))    # 22:00–08:00, now 01:00
 
     def test_wraparound_outside(self):
-        self.assertFalse(app_blocking._in_window(1320, 480, 600))  # 22:00–08:00, now 10:00
+        self.assertFalse(status.in_window(1320, 480, 600))  # 22:00–08:00, now 10:00
 
     def test_zero_length_never_active(self):
-        self.assertFalse(app_blocking._in_window(600, 600, 600))
+        self.assertFalse(status.in_window(600, 600, 600))
 
 
 class TestReadNames(unittest.TestCase):
@@ -436,6 +437,65 @@ class TestApplyAllFilesAbsent(unittest.TestCase):
             app_blocking.apply(is_active=True, strict=True)
         mock_find.assert_not_called()
         mock_kill.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# read_schedule_windows
+# ---------------------------------------------------------------------------
+
+class TestReadScheduleWindowsApps(unittest.TestCase):
+    """read_schedule_windows returns all windows with their names and active state."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        app_blocking.app_blocklist_schedule_file = None
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _sched(self, content):
+        path = os.path.join(self._tmp.name, "blocklist-apps-schedule.txt")
+        with open(path, "w") as f:
+            f.write(content)
+        app_blocking.app_blocklist_schedule_file = path
+
+    def test_none_path_returns_empty(self):
+        self.assertEqual(app_blocking.read_schedule_windows(now_min=600), [])
+
+    def test_returns_active_window(self):
+        self._sched("# 09:00-17:00\nsteam\n")
+        windows = app_blocking.read_schedule_windows(now_min=12 * 60)
+        self.assertEqual(len(windows), 1)
+        start, end, names, is_active = windows[0]
+        self.assertEqual(start, 9 * 60)
+        self.assertEqual(end, 17 * 60)
+        self.assertEqual(names, ["steam"])
+        self.assertTrue(is_active)
+
+    def test_returns_inactive_window(self):
+        self._sched("# 09:00-17:00\nsteam\n")
+        windows = app_blocking.read_schedule_windows(now_min=20 * 60)
+        self.assertEqual(len(windows), 1)
+        _, _, names, is_active = windows[0]
+        self.assertEqual(names, ["steam"])
+        self.assertFalse(is_active)
+
+    def test_returns_all_windows_not_just_active(self):
+        self._sched("# 09:00-17:00\nsteam\n\n# 22:00-08:00\ndiscord\n")
+        windows = app_blocking.read_schedule_windows(now_min=12 * 60)
+        self.assertEqual(len(windows), 2)
+        _, _, names0, active0 = windows[0]
+        _, _, names1, active1 = windows[1]
+        self.assertEqual(names0, ["steam"])
+        self.assertTrue(active0)
+        self.assertEqual(names1, ["discord"])
+        self.assertFalse(active1)
+
+    def test_empty_windows_omitted(self):
+        self._sched("# 09:00-17:00\n# 22:00-08:00\ndiscord\n")
+        windows = app_blocking.read_schedule_windows(now_min=12 * 60)
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0][1], 8 * 60)  # only the 22:00-08:00 window
 
 
 if __name__ == "__main__":

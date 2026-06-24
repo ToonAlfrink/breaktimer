@@ -8,6 +8,7 @@ and vanishes at logout. Either process can restart without the other.
 import fcntl
 import json
 import os
+import re
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, fields
@@ -192,6 +193,40 @@ def format_history_line(daily_work_totals):
     if spark:
         parts.append(spark)
     return "  ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Schedule-window utilities — shared by blocklist.py and app_blocking.py
+# ---------------------------------------------------------------------------
+
+# Matches structured time-window comment headers, e.g. "# 22:00-08:00"
+WINDOW_RE = re.compile(r"^#\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*$")
+
+
+def minutes_since_midnight() -> int:
+    """Return minutes elapsed since midnight (0–1439)."""
+    now = datetime.now()
+    return now.hour * 60 + now.minute
+
+
+def in_window(start_min: int, end_min: int, now_min: int) -> bool:
+    """Is now_min within [start_min, end_min)? Handles midnight wrap-around.
+
+    A zero-length window (start == end) is never active.
+    """
+    if start_min < end_min:       # same-day:    e.g. 09:00–17:00
+        return start_min <= now_min < end_min
+    elif start_min > end_min:     # wrap-around: e.g. 22:00–08:00
+        return now_min >= start_min or now_min < end_min
+    return False
+
+
+def fmt_window(start_min: int, end_min: int) -> str:
+    """Format a time window as 'HH:MM-HH:MM'."""
+    return (
+        f"{start_min // 60:02d}:{start_min % 60:02d}"
+        f"-{end_min // 60:02d}:{end_min % 60:02d}"
+    )
 
 
 # Shared mana-bar palette: bar fraction → colour (black → red → yellow → cyan → blue).

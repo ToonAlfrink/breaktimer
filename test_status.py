@@ -160,6 +160,45 @@ class TestFormatHistoryLine(unittest.TestCase):
         self.assertFalse(any(c in line for c in "▁▂▃▄▅▆▇█"))
 
 
+class TestInWindow(unittest.TestCase):
+    """status.in_window: canonical window-logic tests live here; blocking modules delegate to this."""
+
+    def test_same_day_inside(self):
+        self.assertTrue(status.in_window(9 * 60, 17 * 60, 12 * 60))
+
+    def test_same_day_at_start(self):
+        self.assertTrue(status.in_window(9 * 60, 17 * 60, 9 * 60))
+
+    def test_same_day_at_end_exclusive(self):
+        self.assertFalse(status.in_window(9 * 60, 17 * 60, 17 * 60))
+
+    def test_wraparound_inside(self):
+        self.assertTrue(status.in_window(22 * 60, 8 * 60, 23 * 60))
+
+    def test_wraparound_early_morning(self):
+        self.assertTrue(status.in_window(22 * 60, 8 * 60, 3 * 60))
+
+    def test_wraparound_outside(self):
+        self.assertFalse(status.in_window(22 * 60, 8 * 60, 12 * 60))
+
+    def test_zero_length_never_active(self):
+        self.assertFalse(status.in_window(9 * 60, 9 * 60, 9 * 60))
+
+
+class TestFmtWindow(unittest.TestCase):
+    def test_same_day(self):
+        self.assertEqual(status.fmt_window(9 * 60, 17 * 60), "09:00-17:00")
+
+    def test_wraparound(self):
+        self.assertEqual(status.fmt_window(22 * 60, 8 * 60), "22:00-08:00")
+
+    def test_midnight(self):
+        self.assertEqual(status.fmt_window(0, 6 * 60), "00:00-06:00")
+
+    def test_non_zero_minutes(self):
+        self.assertEqual(status.fmt_window(9 * 60 + 30, 17 * 60 + 45), "09:30-17:45")
+
+
 class TestNoCommandChannel(unittest.TestCase):
     """Pin the invariant: status.py has no IPC surface for time extension.
 

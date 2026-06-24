@@ -6,13 +6,13 @@ Commands:
   url                      print the mobile status page URL (http://<LAN-IP>:8642/)
   brightness off [N] [P]   stop dimming for N minutes (default: 120), park displays at P% (default: 100)
   brightness on            resume automatic dimming
-  blocklist                print the active domain blocklist (from STATE_DIR/blocklist.txt)
+  blocklist                print all domain/app blocking tiers with live context
   restart                  restart all three systemd user services
 """
+import os
 import socket
 import subprocess
 import sys
-import os
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -81,15 +81,14 @@ def cmd_blocklist():
     always   = blocklist.read_domains()
     active   = blocklist.read_domains_active()
     strict_  = blocklist.read_domains_strict()
-    schedule = blocklist.read_domains_schedule()
+    sched_windows      = blocklist.read_schedule_windows()
+    apps_always        = app_blocking.read_names()
+    apps_active        = app_blocking.read_names_active()
+    apps_strict        = app_blocking.read_names_strict()
+    apps_sched_windows = app_blocking.read_schedule_windows()
 
-    apps_always   = app_blocking.read_names()
-    apps_active   = app_blocking.read_names_active()
-    apps_strict   = app_blocking.read_names_strict()
-    apps_schedule = app_blocking.read_names_schedule()
-
-    nothing = not (always or active or strict_ or schedule or
-                   apps_always or apps_active or apps_strict or apps_schedule)
+    nothing = not (always or active or strict_ or sched_windows or
+                   apps_always or apps_active or apps_strict or apps_sched_windows)
     if nothing:
         print("no domains or apps blocked")
         print(f"  domains always:   {blocklist.blocklist_file}")
@@ -113,9 +112,11 @@ def cmd_blocklist():
         tag = "● enforced" if strict else "○ not yet (refill still available)"
         print(f"strict/day-limit blocked domains ({len(strict_)}) [{tag}]:")
         print("\n".join(_fmt_domains(strict_)))
-    if schedule:
-        print(f"schedule blocked domains ({len(schedule)}) [● window active now]:")
-        print("\n".join(_fmt_domains(schedule)))
+    for start_min, end_min, domains, win_active in sched_windows:
+        tag = "● active now" if win_active else "○ inactive"
+        wfmt = status.fmt_window(start_min, end_min)
+        print(f"scheduled domains [{wfmt}] {tag} ({len(domains)}):")
+        print("\n".join(_fmt_domains(domains)))
 
     if apps_always:
         print(f"always blocked apps ({len(apps_always)}):")
@@ -128,9 +129,11 @@ def cmd_blocklist():
         tag = "● enforced" if strict else "○ not yet (refill still available)"
         print(f"strict/day-limit blocked apps ({len(apps_strict)}) [{tag}]:")
         print("\n".join(_fmt_apps(apps_strict)))
-    if apps_schedule:
-        print(f"schedule blocked apps ({len(apps_schedule)}) [● window active now]:")
-        print("\n".join(_fmt_apps(apps_schedule)))
+    for start_min, end_min, names, win_active in apps_sched_windows:
+        tag = "● active now" if win_active else "○ inactive"
+        wfmt = status.fmt_window(start_min, end_min)
+        print(f"scheduled apps [{wfmt}] {tag} ({len(names)}):")
+        print("\n".join(_fmt_apps(names)))
 
 
 def cmd_url(port=8642):

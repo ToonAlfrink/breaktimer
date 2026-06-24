@@ -15,18 +15,18 @@ File format: one process name per line (bare names, no path). Names are matched
 case-insensitively and exactly (whole process name via pgrep -ix). The owner lists
 the name that appears in `ps` / `pgrep` output, e.g. "steam", "discord", "firefox".
 
-apply(is_active, strict) is called alongside blocklist.apply() in the adjustment
-tick every 10 s. It is idempotent — once a process is dead, pgrep finds nothing
-and the call is a no-op. Each kill is logged with process name, PID, and the tier
-that triggered it (why-it-acted trail). Processes owned by other users are silently
-skipped (PermissionError from os.kill).
+apply(is_active, strict) is called every tick (1 Hz) from the timer core. It is
+idempotent — once a process is dead, pgrep finds nothing and the call is a no-op.
+Each kill is logged with process name, PID, and the tier that triggered it
+(why-it-acted trail). Processes owned by other users are silently skipped
+(PermissionError from os.kill).
 """
-import datetime
 import logging
 import os
-import re
 import signal
 import subprocess
+
+import status
 
 log = logging.getLogger("breaktimer.apps")
 
@@ -35,27 +35,6 @@ app_blocklist_file: str | None = None           # always-blocked tier
 app_blocklist_active_file: str | None = None    # work-session tier
 app_blocklist_strict_file: str | None = None    # strict tier
 app_blocklist_schedule_file: str | None = None  # schedule tier
-
-# Regex for window header lines in blocklist-apps-schedule.txt, e.g. "# 22:00-08:00"
-_WINDOW_RE = re.compile(r"^#\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*$")
-
-
-def _minutes_since_midnight() -> int:
-    """Return minutes elapsed since midnight (0–1439)."""
-    now = datetime.datetime.now()
-    return now.hour * 60 + now.minute
-
-
-def _in_window(start_min: int, end_min: int, now_min: int) -> bool:
-    """Is now_min within [start_min, end_min)? Handles midnight wrap-around.
-
-    A zero-length window (start == end) is never active.
-    """
-    if start_min < end_min:       # same-day:    e.g. 09:00–17:00
-        return start_min <= now_min < end_min
-    elif start_min > end_min:     # wrap-around: e.g. 22:00–08:00
-        return now_min >= start_min or now_min < end_min
-    return False
 
 
 def _read_names(path: str | None) -> list[str]:
@@ -80,31 +59,43 @@ def _read_names(path: str | None) -> list[str]:
     return sorted(names)
 
 
-def _read_names_scheduled(path: str | None, now_min: int | None = None) -> list[str]:
-    """Parse a schedule file and return app names whose window is currently active.
+def _read_file_all_windows(
+    path: str | None, now_min: int | None = None
+) -> list[tuple[int, int, list[str], bool]]:
+    """Parse a schedule file and return all windows with their names and active state.
 
-    Structured-comment headers (# HH:MM-HH:MM) define windows; app names listed
-    below each header are included when that window is active. Names before the
-    first window header are ignored.
+    Each entry is (start_min, end_min, names, is_active_now). Windows with no
+    names are omitted. Names before the first window header are ignored.
     """
     if not path:
         return []
     if now_min is None:
-        now_min = _minutes_since_midnight()
+        now_min = status.minutes_since_midnight()
     try:
         with open(path) as f:
             lines = f.readlines()
     except OSError:
         return []
+
+    result: list[tuple[int, int, list[str], bool]] = []
     current_window: tuple[int, int] | None = None
-    names: list[str] = []
+    current_names: list[str] = []
     seen: set[str] = set()
+
+    def _flush():
+        if current_window is not None and current_names:
+            is_active = status.in_window(current_window[0], current_window[1], now_min)
+            result.append((current_window[0], current_window[1], list(current_names), is_active))
+
     for raw in lines:
         stripped = raw.strip()
         if not stripped:
             continue
-        m = _WINDOW_RE.match(stripped)
+        m = status.WINDOW_RE.match(stripped)
         if m:
+            _flush()
+            current_names = []
+            seen = set()
             sh, sm = m.group(1).split(":")
             eh, em = m.group(2).split(":")
             current_window = (int(sh) * 60 + int(sm), int(eh) * 60 + int(em))
@@ -113,11 +104,28 @@ def _read_names_scheduled(path: str | None, now_min: int | None = None) -> list[
             continue
         if current_window is None:
             continue
-        if _in_window(current_window[0], current_window[1], now_min):
-            name = stripped.lower()
-            if name not in seen:
-                seen.add(name)
-                names.append(name)
+        name = stripped.lower()
+        if name not in seen:
+            seen.add(name)
+            current_names.append(name)
+
+    _flush()
+    return result
+
+
+def _read_names_scheduled(path: str | None, now_min: int | None = None) -> list[str]:
+    """Parse a schedule file and return app names whose window is currently active.
+
+    Names before the first window header are ignored.
+    """
+    seen: set[str] = set()
+    names: list[str] = []
+    for _, _, window_names, is_active in _read_file_all_windows(path, now_min):
+        if is_active:
+            for n in window_names:
+                if n not in seen:
+                    seen.add(n)
+                    names.append(n)
     return sorted(names)
 
 
@@ -166,6 +174,16 @@ def read_names_strict() -> list[str]:
 def read_names_schedule(now_min: int | None = None) -> list[str]:
     """Return schedule-tier app names from blocklist-apps-schedule.txt active right now."""
     return _read_names_scheduled(app_blocklist_schedule_file, now_min)
+
+
+def read_schedule_windows(now_min: int | None = None) -> list[tuple[int, int, list[str], bool]]:
+    """Return all schedule windows from blocklist-apps-schedule.txt with their active state.
+
+    Each entry is (start_min, end_min, names, is_active_now). Returns all
+    windows regardless of whether they are currently active — useful for
+    displaying the full schedule configuration in 'breaktimer blocklist'.
+    """
+    return _read_file_all_windows(app_blocklist_schedule_file, now_min)
 
 
 def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = None) -> None:

@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 import blocklist
+import status
 
 logging.getLogger("breaktimer").addHandler(logging.NullHandler())
 
@@ -68,8 +69,12 @@ class InTempDir(unittest.TestCase):
         blocklist._last_written          = None
         blocklist._last_written_mtime_ns = None
         blocklist._write_failed          = False
+        # Disable DoH sinkholing so tests can check exact /etc/hosts content.
+        self._orig_doh = blocklist.DOH_SERVER_DOMAINS
+        blocklist.DOH_SERVER_DOMAINS = frozenset()
 
     def tearDown(self):
+        blocklist.DOH_SERVER_DOMAINS = self._orig_doh
         self._tmp.cleanup()
 
     @property
@@ -528,42 +533,42 @@ class TestBlocklistActionTrail(InTempDir):
 # ---------------------------------------------------------------------------
 
 class TestInWindow(unittest.TestCase):
-    """_in_window: same-day, wrap-around, and edge cases."""
+    """status.in_window: same-day, wrap-around, and edge cases."""
 
     def test_same_day_window_inside(self):
-        self.assertTrue(blocklist._in_window(9 * 60, 17 * 60, 12 * 60))
+        self.assertTrue(status.in_window(9 * 60, 17 * 60, 12 * 60))
 
     def test_same_day_window_at_start(self):
-        self.assertTrue(blocklist._in_window(9 * 60, 17 * 60, 9 * 60))
+        self.assertTrue(status.in_window(9 * 60, 17 * 60, 9 * 60))
 
     def test_same_day_window_at_end_exclusive(self):
-        self.assertFalse(blocklist._in_window(9 * 60, 17 * 60, 17 * 60))
+        self.assertFalse(status.in_window(9 * 60, 17 * 60, 17 * 60))
 
     def test_same_day_window_before(self):
-        self.assertFalse(blocklist._in_window(9 * 60, 17 * 60, 8 * 60))
+        self.assertFalse(status.in_window(9 * 60, 17 * 60, 8 * 60))
 
     def test_same_day_window_after(self):
-        self.assertFalse(blocklist._in_window(9 * 60, 17 * 60, 18 * 60))
+        self.assertFalse(status.in_window(9 * 60, 17 * 60, 18 * 60))
 
     def test_wraparound_window_late_night(self):
         # 22:00-08:00 — 23:00 is inside
-        self.assertTrue(blocklist._in_window(22 * 60, 8 * 60, 23 * 60))
+        self.assertTrue(status.in_window(22 * 60, 8 * 60, 23 * 60))
 
     def test_wraparound_window_early_morning(self):
         # 22:00-08:00 — 03:00 is inside
-        self.assertTrue(blocklist._in_window(22 * 60, 8 * 60, 3 * 60))
+        self.assertTrue(status.in_window(22 * 60, 8 * 60, 3 * 60))
 
     def test_wraparound_window_at_start(self):
-        self.assertTrue(blocklist._in_window(22 * 60, 8 * 60, 22 * 60))
+        self.assertTrue(status.in_window(22 * 60, 8 * 60, 22 * 60))
 
     def test_wraparound_window_at_end_exclusive(self):
-        self.assertFalse(blocklist._in_window(22 * 60, 8 * 60, 8 * 60))
+        self.assertFalse(status.in_window(22 * 60, 8 * 60, 8 * 60))
 
     def test_wraparound_window_midday_outside(self):
-        self.assertFalse(blocklist._in_window(22 * 60, 8 * 60, 12 * 60))
+        self.assertFalse(status.in_window(22 * 60, 8 * 60, 12 * 60))
 
     def test_zero_length_window_never_active(self):
-        self.assertFalse(blocklist._in_window(9 * 60, 9 * 60, 9 * 60))
+        self.assertFalse(status.in_window(9 * 60, 9 * 60, 9 * 60))
 
 
 class TestScheduleTier(InTempDir):
@@ -801,6 +806,128 @@ class TestBlocklistIntegration(unittest.TestCase):
             blocklist_effect()
         _, kwargs = mock_apply.call_args
         self.assertTrue(kwargs["strict"], "strict must be True when refill_multiplier=0")
+
+
+# ---------------------------------------------------------------------------
+# DoH sinkholing
+# ---------------------------------------------------------------------------
+
+class TestDoHSinkholing(InTempDir):
+    """apply() automatically sinkholed DoH provider hostnames when any domains are blocked."""
+
+    def setUp(self):
+        super().setUp()
+        self._hosts = os.path.join(self.tmpdir, "hosts")
+        with open(self._hosts, "w") as f:
+            f.write("127.0.0.1 localhost\n")
+        self._hosts_patch = mock.patch.object(blocklist, "HOSTS_PATH", self._hosts)
+        self._hosts_patch.start()
+        # Re-enable DoH sinkholing for this test class (InTempDir.setUp disabled it).
+        blocklist.DOH_SERVER_DOMAINS = frozenset(["dns.google", "cloudflare-dns.com"])
+
+    def tearDown(self):
+        self._hosts_patch.stop()
+        super().tearDown()
+
+    def _hosts_content(self):
+        with open(self._hosts) as f:
+            return f.read()
+
+    def test_doh_domains_added_when_any_domain_blocked(self):
+        _set_always(self.tmpdir, "reddit.com\n")
+        blocklist.apply()
+        content = self._hosts_content()
+        self.assertIn("dns.google", content)
+        self.assertIn("cloudflare-dns.com", content)
+
+    def test_doh_domains_not_added_when_no_domains_blocked(self):
+        # All tier files empty/absent — no blocks, no DoH sinkholing either.
+        blocklist.apply()
+        content = self._hosts_content()
+        self.assertNotIn("dns.google", content)
+        self.assertNotIn("cloudflare-dns.com", content)
+
+    def test_doh_tier_label_in_log(self):
+        _set_always(self.tmpdir, "reddit.com\n")
+        with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
+            blocklist.apply()
+        self.assertTrue(any("doh:" in m for m in cm.output))
+
+    def test_doh_not_added_when_doh_set_empty(self):
+        """Setting DOH_SERVER_DOMAINS=frozenset() disables auto-sinkholing."""
+        blocklist.DOH_SERVER_DOMAINS = frozenset()
+        _set_always(self.tmpdir, "reddit.com\n")
+        blocklist.apply()
+        content = self._hosts_content()
+        self.assertNotIn("dns.google", content)
+
+    def test_user_domain_in_doh_set_appears_once(self):
+        """If a user adds a DoH provider to their own blocklist, no duplicate entry."""
+        blocklist.DOH_SERVER_DOMAINS = frozenset(["dns.google"])
+        _set_always(self.tmpdir, "dns.google\n")
+        blocklist.apply()
+        self.assertEqual(self._hosts_content().count("0.0.0.0 dns.google"), 1)
+
+
+# ---------------------------------------------------------------------------
+# read_schedule_windows
+# ---------------------------------------------------------------------------
+
+class TestReadScheduleWindows(InTempDir):
+    """read_schedule_windows returns all windows with their domains and active state."""
+
+    def test_missing_file_returns_empty(self):
+        blocklist.blocklist_schedule_file = os.path.join(self.tmpdir, "missing.txt")
+        self.assertEqual(blocklist.read_schedule_windows(now_min=12 * 60), [])
+
+    def test_none_path_returns_empty(self):
+        blocklist.blocklist_schedule_file = None
+        self.assertEqual(blocklist.read_schedule_windows(now_min=12 * 60), [])
+
+    def test_returns_active_window(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nreddit.com\n")
+        windows = blocklist.read_schedule_windows(now_min=12 * 60)
+        self.assertEqual(len(windows), 1)
+        start, end, domains, is_active = windows[0]
+        self.assertEqual(start, 9 * 60)
+        self.assertEqual(end, 17 * 60)
+        self.assertEqual(domains, ["reddit.com"])
+        self.assertTrue(is_active)
+
+    def test_returns_inactive_window(self):
+        _set_schedule(self.tmpdir, "# 09:00-17:00\nreddit.com\n")
+        windows = blocklist.read_schedule_windows(now_min=20 * 60)
+        self.assertEqual(len(windows), 1)
+        _, _, domains, is_active = windows[0]
+        self.assertEqual(domains, ["reddit.com"])
+        self.assertFalse(is_active)
+
+    def test_returns_all_windows_not_just_active(self):
+        content = "# 09:00-17:00\nwork.com\n\n# 22:00-08:00\nnight.com\n"
+        _set_schedule(self.tmpdir, content)
+        # At 12:00 only the first window is active, but both are returned.
+        windows = blocklist.read_schedule_windows(now_min=12 * 60)
+        self.assertEqual(len(windows), 2)
+        _, _, domains0, active0 = windows[0]
+        _, _, domains1, active1 = windows[1]
+        self.assertEqual(domains0, ["work.com"])
+        self.assertTrue(active0)
+        self.assertEqual(domains1, ["night.com"])
+        self.assertFalse(active1)
+
+    def test_empty_windows_omitted(self):
+        # A window header with no domains under it should not appear.
+        _set_schedule(self.tmpdir, "# 09:00-17:00\n# 22:00-08:00\nnight.com\n")
+        windows = blocklist.read_schedule_windows(now_min=12 * 60)
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0][1], 8 * 60)  # only the 22:00-08:00 window
+
+    def test_domains_before_first_header_ignored(self):
+        content = "orphan.com\n# 09:00-17:00\nvalid.com\n"
+        _set_schedule(self.tmpdir, content)
+        windows = blocklist.read_schedule_windows(now_min=12 * 60)
+        self.assertEqual(len(windows), 1)
+        self.assertNotIn("orphan.com", windows[0][2])
 
 
 if __name__ == "__main__":
