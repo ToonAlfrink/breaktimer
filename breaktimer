@@ -70,27 +70,29 @@ def cmd_blocklist():
     def _fmt_apps(names):
         return [f"    {n}  →  SIGTERM→SIGKILL" for n in names]
 
-    always   = status.read_items(blocklist.blocklist_file)
-    active   = status.read_items(blocklist.blocklist_active_file)
-    strict_  = status.read_items(blocklist.blocklist_strict_file)
-    sched_windows      = status.parse_schedule_file(blocklist.blocklist_schedule_file)
-    apps_always        = status.read_items(app_blocking.app_blocklist_file)
-    apps_active        = status.read_items(app_blocking.app_blocklist_active_file)
-    apps_strict        = status.read_items(app_blocking.app_blocklist_strict_file)
-    apps_sched_windows = status.parse_schedule_file(app_blocking.app_blocklist_schedule_file)
+    t  = blocklist._tiers
+    at = app_blocking._tiers
+    always   = status.read_items(t.always)
+    active   = status.read_items(t.active)
+    strict_  = status.read_items(t.strict)
+    sched_windows      = status.parse_schedule_file(t.schedule)
+    apps_always        = status.read_items(at.always)
+    apps_active        = status.read_items(at.active)
+    apps_strict        = status.read_items(at.strict)
+    apps_sched_windows = status.parse_schedule_file(at.schedule)
 
     nothing = not (always or active or strict_ or sched_windows or
                    apps_always or apps_active or apps_strict or apps_sched_windows)
     if nothing:
         print("no domains or apps blocked")
-        print(f"  domains always:   {blocklist.blocklist_file}")
-        print(f"  domains active:   {blocklist.blocklist_active_file}  (blocked during work sessions)")
-        print(f"  domains strict:   {blocklist.blocklist_strict_file}  (blocked when daily refill is gone)")
-        print(f"  domains schedule: {blocklist.blocklist_schedule_file}  (blocked during time windows)")
-        print(f"  apps always:      {app_blocking.app_blocklist_file}")
-        print(f"  apps active:      {app_blocking.app_blocklist_active_file}  (killed during work sessions)")
-        print(f"  apps strict:      {app_blocking.app_blocklist_strict_file}  (killed when daily refill is gone)")
-        print(f"  apps schedule:    {app_blocking.app_blocklist_schedule_file}  (killed during time windows)")
+        print(f"  domains always:   {t.always}")
+        print(f"  domains active:   {t.active}  (blocked during work sessions)")
+        print(f"  domains strict:   {t.strict}  (blocked when daily refill is gone)")
+        print(f"  domains schedule: {t.schedule}  (blocked during time windows)")
+        print(f"  apps always:      {at.always}")
+        print(f"  apps active:      {at.active}  (killed during work sessions)")
+        print(f"  apps strict:      {at.strict}  (killed when daily refill is gone)")
+        print(f"  apps schedule:    {at.schedule}  (killed during time windows)")
         return
 
     if always:

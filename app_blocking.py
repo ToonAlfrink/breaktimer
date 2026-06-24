@@ -31,20 +31,14 @@ import status
 
 log = logging.getLogger("breaktimer.apps")
 
-# Tier file paths — set via init(state_dir) before the first apply() call.
-app_blocklist_file: str | None = None           # always-blocked tier
-app_blocklist_active_file: str | None = None    # work-session tier
-app_blocklist_strict_file: str | None = None    # strict tier
-app_blocklist_schedule_file: str | None = None  # schedule tier
+# Tier configuration — set via init(state_dir) before the first apply() call.
+_tiers: status.TierSet | None = None
 
 
 def init(state_dir: str) -> None:
-    """Bind all tier file paths to state_dir. Must be called before apply()."""
-    global app_blocklist_file, app_blocklist_active_file, app_blocklist_strict_file, app_blocklist_schedule_file
-    app_blocklist_file          = os.path.join(state_dir, "blocklist-apps.txt")
-    app_blocklist_active_file   = os.path.join(state_dir, "blocklist-apps-active.txt")
-    app_blocklist_strict_file   = os.path.join(state_dir, "blocklist-apps-strict.txt")
-    app_blocklist_schedule_file = os.path.join(state_dir, "blocklist-apps-schedule.txt")
+    """Bind tier file paths to state_dir. Must be called before apply()."""
+    global _tiers
+    _tiers = status.TierSet.for_prefix(state_dir, "blocklist-apps")
 
 # Signal escalation: SIGTERM on first contact, SIGKILL if the process is still
 # alive after this many apply() calls.  At 1 Hz that equals 5 seconds.
@@ -98,21 +92,14 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     global _apply_count
     _apply_count += 1
 
-    always_names   = set(status.read_items(app_blocklist_file))
-    active_names   = set(status.read_items(app_blocklist_active_file)) if is_active else set()
-    strict_names   = set(status.read_items(app_blocklist_strict_file)) if strict else set()
-    schedule_names = set(status.active_schedule_items(app_blocklist_schedule_file, _now_min))
+    if _tiers is None:
+        return
 
     # Map each name to the tier(s) that triggered it (for the log).
     tier_map: dict[str, list[str]] = {}
-    for name in always_names:
-        tier_map.setdefault(name, []).append("always")
-    for name in active_names:
-        tier_map.setdefault(name, []).append("active")
-    for name in strict_names:
-        tier_map.setdefault(name, []).append("strict")
-    for name in schedule_names:
-        tier_map.setdefault(name, []).append("schedule")
+    for tier_name, names in _tiers.breakdown(is_active, strict, _now_min).items():
+        for name in names:
+            tier_map.setdefault(name, []).append(tier_name)
 
     in_scope: set[int] = set()
     for name, tiers in sorted(tier_map.items()):

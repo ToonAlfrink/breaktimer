@@ -61,20 +61,14 @@ HOSTS_PATH = "/etc/hosts"
 _BLOCK_BEGIN = "# BEGIN breaktimer-blocklist"
 _BLOCK_END = "# END breaktimer-blocklist"
 
-# Tier file paths — set via init(state_dir) before the first apply() call.
-blocklist_file: str | None = None           # always-blocked tier
-blocklist_active_file: str | None = None    # work-session tier (blocked while timer active)
-blocklist_strict_file: str | None = None    # strict tier (blocked when daily refill is gone)
-blocklist_schedule_file: str | None = None  # schedule tier (blocked during time windows)
+# Tier configuration — set via init(state_dir) before the first apply() call.
+_tiers: status.TierSet | None = None
 
 
 def init(state_dir: str) -> None:
-    """Bind all tier file paths to state_dir. Must be called before apply()."""
-    global blocklist_file, blocklist_active_file, blocklist_strict_file, blocklist_schedule_file
-    blocklist_file          = os.path.join(state_dir, "blocklist.txt")
-    blocklist_active_file   = os.path.join(state_dir, "blocklist-active.txt")
-    blocklist_strict_file   = os.path.join(state_dir, "blocklist-strict.txt")
-    blocklist_schedule_file = os.path.join(state_dir, "blocklist-schedule.txt")
+    """Bind tier file paths to state_dir. Must be called before apply()."""
+    global _tiers
+    _tiers = status.TierSet.for_prefix(state_dir, "blocklist")
 
 # Well-known DoH providers — automatically added to the sinkhole whenever any
 # user-configured domains are blocked, so browsers cannot bypass /etc/hosts via
@@ -196,12 +190,11 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     """
     global _last_written, _last_written_mtime_ns, _write_failed
 
-    always_domains   = set(status.read_items(blocklist_file))
-    active_domains   = set(status.read_items(blocklist_active_file)) if is_active else set()
-    strict_domains   = set(status.read_items(blocklist_strict_file)) if strict else set()
-    schedule_domains = set(status.active_schedule_items(blocklist_schedule_file, _now_min))
+    if _tiers is None:
+        return
 
-    user_domains = always_domains | active_domains | strict_domains | schedule_domains
+    breakdown = _tiers.breakdown(is_active, strict, _now_min)
+    user_domains: set[str] = set().union(*breakdown.values())
     # When any user-configured domains are blocked, also sinkhole well-known DoH
     # providers so browsers cannot route around /etc/hosts via DNS-over-HTTPS.
     doh_domains = DOH_SERVER_DOMAINS if user_domains else frozenset()
@@ -249,15 +242,7 @@ def apply(is_active: bool = False, strict: bool = False, _now_min: int | None = 
     except OSError:
         _last_written_mtime_ns = None
     if all_domains:
-        tiers = []
-        if always_domains:
-            tiers.append(f"always:{len(always_domains)}")
-        if is_active and active_domains:
-            tiers.append(f"active:{len(active_domains)}")
-        if strict and strict_domains:
-            tiers.append(f"strict:{len(strict_domains)}")
-        if schedule_domains:
-            tiers.append(f"schedule:{len(schedule_domains)}")
+        tiers = [f"{t}:{len(items)}" for t, items in breakdown.items() if items]
         if doh_domains:
             tiers.append(f"doh:{len(doh_domains)}")
         log.info(

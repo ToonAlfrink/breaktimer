@@ -31,28 +31,24 @@ def _write_file(path, content):
 def _set_always(tmpdir, content):
     path = os.path.join(tmpdir, "blocklist.txt")
     _write_file(path, content)
-    blocklist.blocklist_file = path
     return path
 
 
 def _set_active(tmpdir, content):
     path = os.path.join(tmpdir, "blocklist-active.txt")
     _write_file(path, content)
-    blocklist.blocklist_active_file = path
     return path
 
 
 def _set_strict(tmpdir, content):
     path = os.path.join(tmpdir, "blocklist-strict.txt")
     _write_file(path, content)
-    blocklist.blocklist_strict_file = path
     return path
 
 
 def _set_schedule(tmpdir, content):
     path = os.path.join(tmpdir, "blocklist-schedule.txt")
     _write_file(path, content)
-    blocklist.blocklist_schedule_file = path
     return path
 
 
@@ -61,11 +57,8 @@ class InTempDir(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        # Reset module-level state between tests.
-        blocklist.blocklist_file          = None
-        blocklist.blocklist_active_file   = None
-        blocklist.blocklist_strict_file   = None
-        blocklist.blocklist_schedule_file = None
+        # Bind tier paths to tmpdir; reset write-tracking state between tests.
+        blocklist.init(self._tmp.name)
         blocklist._last_written          = None
         blocklist._last_written_mtime_ns = None
         blocklist._write_failed          = False

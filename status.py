@@ -341,6 +341,55 @@ def active_schedule_items(
     return sorted(items)
 
 
+# ---------------------------------------------------------------------------
+# Four-tier blocking configuration — shared by blocklist.py and app_blocking.py
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TierSet:
+    """Paths for the four blocking tiers: always / active / strict / schedule.
+
+    Each tier is an owner-edited flat file. init() in blocklist.py and
+    app_blocking.py constructs one via for_prefix(); apply() in both calls
+    breakdown() to resolve which items are active without repeating the
+    tier-union logic.
+    """
+    always: str | None
+    active: str | None
+    strict: str | None
+    schedule: str | None
+
+    @classmethod
+    def for_prefix(cls, state_dir: str, prefix: str) -> "TierSet":
+        """Construct paths from a state_dir and filename prefix.
+
+        Convention: {prefix}.txt, {prefix}-active.txt, {prefix}-strict.txt,
+        {prefix}-schedule.txt.
+        """
+        def p(suffix: str) -> str:
+            return os.path.join(state_dir, f"{prefix}{suffix}")
+        return cls(
+            always=p(".txt"),
+            active=p("-active.txt"),
+            strict=p("-strict.txt"),
+            schedule=p("-schedule.txt"),
+        )
+
+    def breakdown(
+        self,
+        is_active: bool = False,
+        strict: bool = False,
+        now_min: int | None = None,
+    ) -> dict[str, frozenset[str]]:
+        """Active items per tier: {'always': frozenset, 'active': frozenset, ...}."""
+        return {
+            "always":   frozenset(read_items(self.always)),
+            "active":   frozenset(read_items(self.active)) if is_active else frozenset(),
+            "strict":   frozenset(read_items(self.strict)) if strict else frozenset(),
+            "schedule": frozenset(active_schedule_items(self.schedule, now_min)),
+        }
+
+
 # Shared mana-bar palette: bar fraction → colour (black → red → yellow → cyan → blue).
 COLOR_STOPS = (
     (0.00, 130, 0, 0),

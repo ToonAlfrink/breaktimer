@@ -7,6 +7,7 @@ from unittest.mock import call, patch
 
 import app_blocking
 import status
+from status import TierSet
 
 
 def _write(path, content):
@@ -130,18 +131,15 @@ class TestApplyTiers(unittest.TestCase):
             _write(path, content)
             return path
 
-        app_blocking.app_blocklist_file          = write("blocklist-apps.txt",          "steam\n")
-        app_blocking.app_blocklist_active_file   = write("blocklist-apps-active.txt",   "discord\n")
-        app_blocking.app_blocklist_strict_file   = write("blocklist-apps-strict.txt",   "spotify\n")
-        app_blocking.app_blocklist_schedule_file = write("blocklist-apps-schedule.txt",
-                                                          "# 09:00-17:00\nvlc\n")
+        write("blocklist-apps.txt",          "steam\n")
+        write("blocklist-apps-active.txt",   "discord\n")
+        write("blocklist-apps-strict.txt",   "spotify\n")
+        write("blocklist-apps-schedule.txt", "# 09:00-17:00\nvlc\n")
+        app_blocking.init(d)
 
     def tearDown(self):
         self.dir.cleanup()
-        app_blocking.app_blocklist_file          = None
-        app_blocking.app_blocklist_active_file   = None
-        app_blocking.app_blocklist_strict_file   = None
-        app_blocking.app_blocklist_schedule_file = None
+        app_blocking._tiers = None
 
     def _apply(self, is_active, strict, now_min=600):
         with patch.object(app_blocking, "_find_pids", return_value=[]) as mock_find, \
@@ -207,16 +205,13 @@ class TestApplyKills(unittest.TestCase):
         d = self.dir.name
         path = os.path.join(d, "blocklist-apps.txt")
         _write(path, "steam\n")
-        app_blocking.app_blocklist_file          = path
-        app_blocking.app_blocklist_active_file   = None
-        app_blocking.app_blocklist_strict_file   = None
-        app_blocking.app_blocklist_schedule_file = None
+        app_blocking._tiers = TierSet(always=path, active=None, strict=None, schedule=None)
         app_blocking._sigterm_tick.clear()
         app_blocking._apply_count = 0
 
     def tearDown(self):
         self.dir.cleanup()
-        app_blocking.app_blocklist_file = None
+        app_blocking._tiers = None
         app_blocking._sigterm_tick.clear()
 
     def test_sigterms_each_pid_on_first_apply(self):
@@ -248,17 +243,15 @@ class TestApplyLogTrail(unittest.TestCase):
             _write(path, content)
             return path
 
-        app_blocking.app_blocklist_file          = write("blocklist-apps.txt",        "steam\n")
-        app_blocking.app_blocklist_active_file   = write("blocklist-apps-active.txt", "discord\n")
-        app_blocking.app_blocklist_strict_file   = None
-        app_blocking.app_blocklist_schedule_file = None
+        always_path = write("blocklist-apps.txt",        "steam\n")
+        active_path = write("blocklist-apps-active.txt", "discord\n")
+        app_blocking._tiers = TierSet(always=always_path, active=active_path, strict=None, schedule=None)
         app_blocking._sigterm_tick.clear()
         app_blocking._apply_count = 0
 
     def tearDown(self):
         self.dir.cleanup()
-        app_blocking.app_blocklist_file        = None
-        app_blocking.app_blocklist_active_file = None
+        app_blocking._tiers = None
         app_blocking._sigterm_tick.clear()
 
     def test_logs_sigterm_with_name_pid_and_tier(self):
@@ -271,7 +264,7 @@ class TestApplyLogTrail(unittest.TestCase):
 
     def test_logs_multi_tier_name(self):
         """A name in both always and active tiers shows combined tier label."""
-        _write(app_blocking.app_blocklist_active_file, "steam\n")
+        _write(app_blocking._tiers.active, "steam\n")
         with patch.object(app_blocking, "_find_pids", return_value=[7]), \
              patch.object(app_blocking, "_send_signal", return_value=True), \
              self.assertLogs("breaktimer.apps", level="INFO") as cm:
@@ -294,13 +287,10 @@ class TestApplyLogTrail(unittest.TestCase):
 
 
 class TestApplyAllFilesAbsent(unittest.TestCase):
-    """apply() with all file paths unset is a no-op — no crash."""
+    """apply() with no tier config is a no-op — no crash."""
 
     def setUp(self):
-        app_blocking.app_blocklist_file          = None
-        app_blocking.app_blocklist_active_file   = None
-        app_blocking.app_blocklist_strict_file   = None
-        app_blocking.app_blocklist_schedule_file = None
+        app_blocking._tiers = None
         app_blocking._sigterm_tick.clear()
 
     def tearDown(self):
@@ -321,16 +311,13 @@ class TestSigkillEscalation(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         path = os.path.join(self.dir.name, "blocklist-apps.txt")
         _write(path, "steam\n")
-        app_blocking.app_blocklist_file          = path
-        app_blocking.app_blocklist_active_file   = None
-        app_blocking.app_blocklist_strict_file   = None
-        app_blocking.app_blocklist_schedule_file = None
+        app_blocking._tiers = TierSet(always=path, active=None, strict=None, schedule=None)
         app_blocking._sigterm_tick.clear()
         app_blocking._apply_count = 0
 
     def tearDown(self):
         self.dir.cleanup()
-        app_blocking.app_blocklist_file = None
+        app_blocking._tiers = None
         app_blocking._sigterm_tick.clear()
 
     def _run(self, n, pids):
