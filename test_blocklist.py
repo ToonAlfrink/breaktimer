@@ -53,21 +53,23 @@ def _set_schedule(tmpdir, content):
 
 
 class InTempDir(unittest.TestCase):
-    """Each test gets an isolated tmpdir and a clean module state."""
+    """Each test gets an isolated tmpdir, a temp hosts file, and a clean Blocklist instance."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        # Bind tier paths to tmpdir; reset write-tracking state between tests.
-        blocklist.init(self._tmp.name)
-        blocklist._last_written          = None
-        blocklist._last_written_mtime_ns = None
-        blocklist._write_failed          = False
+        # Create a temporary hosts file for the Blocklist to write to
+        fh = tempfile.NamedTemporaryFile(mode="w", suffix="-hosts", delete=False)
+        fh.close()
+        self._hosts_file = fh.name
+        self.bl = blocklist.Blocklist(self._tmp.name, hosts_path=self._hosts_file)
         # Disable DoH sinkholing so tests can check exact /etc/hosts content.
-        self._orig_doh = blocklist.DOH_SERVER_DOMAINS
-        blocklist.DOH_SERVER_DOMAINS = frozenset()
+        self.bl.doh_domains = frozenset()
 
     def tearDown(self):
-        blocklist.DOH_SERVER_DOMAINS = self._orig_doh
+        try:
+            os.unlink(self._hosts_file)
+        except OSError:
+            pass
         self._tmp.cleanup()
 
     @property
@@ -156,7 +158,7 @@ class TestSplice(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# apply() — end-to-end with mocked /etc/hosts
+# apply() — end-to-end with a temp hosts file
 # ---------------------------------------------------------------------------
 
 class TestApply(InTempDir):
@@ -164,149 +166,142 @@ class TestApply(InTempDir):
 
     def setUp(self):
         super().setUp()
-        # Redirect HOSTS_PATH to a temp file so we never touch the real one.
-        self._hosts = os.path.join(self.tmpdir, "hosts")
-        with open(self._hosts, "w") as f:
+        with open(self._hosts_file, "w") as f:
             f.write("127.0.0.1 localhost\n")
-        self._hosts_patch = mock.patch.object(blocklist, "HOSTS_PATH", self._hosts)
-        self._hosts_patch.start()
-
-    def tearDown(self):
-        self._hosts_patch.stop()
-        super().tearDown()
 
     def test_apply_with_domains_writes_sinkhole_block(self):
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()
-        with open(self._hosts) as f:
+        self.bl.apply()
+        with open(self._hosts_file) as f:
             content = f.read()
         self.assertIn("0.0.0.0 example.com", content)
         self.assertIn("# BEGIN breaktimer-blocklist", content)
 
     def test_apply_is_idempotent(self):
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()
-        mtime1 = os.stat(self._hosts).st_mtime_ns
-        blocklist.apply()
-        mtime2 = os.stat(self._hosts).st_mtime_ns
+        self.bl.apply()
+        mtime1 = os.stat(self._hosts_file).st_mtime_ns
+        self.bl.apply()
+        mtime2 = os.stat(self._hosts_file).st_mtime_ns
         self.assertEqual(mtime1, mtime2, "second apply with same domains must not rewrite the file")
 
     def test_apply_logs_sinkhole_action(self):
         _set_always(self.tmpdir, "example.com\n")
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply()
+            self.bl.apply()
         self.assertTrue(any("sinkholed" in m and "example.com" in m for m in cm.output))
 
     def test_apply_removes_block_when_all_files_emptied(self):
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()
+        self.bl.apply()
         # Clear the always-blocked list
         _set_always(self.tmpdir, "")
-        blocklist._last_written = None  # force re-evaluation
-        blocklist.apply()
-        with open(self._hosts) as f:
+        self.bl._last_written = None  # force re-evaluation
+        self.bl.apply()
+        with open(self._hosts_file) as f:
             content = f.read()
         self.assertNotIn("BEGIN breaktimer-blocklist", content)
         self.assertNotIn("example.com", content)
 
     def test_apply_logs_removal(self):
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()
+        self.bl.apply()
         _set_always(self.tmpdir, "")
-        blocklist._last_written = None
+        self.bl._last_written = None
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply()
+            self.bl.apply()
         self.assertTrue(any("removed" in m for m in cm.output))
 
     def test_apply_no_log_when_nothing_changes(self):
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()  # first apply — logs
+        self.bl.apply()  # first apply — logs
         with self.assertNoLogs("breaktimer.blocklist", level="INFO"):
-            blocklist.apply()
+            self.bl.apply()
 
     def test_apply_preserves_existing_hosts_content(self):
         _set_always(self.tmpdir, "blocked.com\n")
-        blocklist.apply()
-        with open(self._hosts) as f:
+        self.bl.apply()
+        with open(self._hosts_file) as f:
             content = f.read()
         self.assertIn("127.0.0.1 localhost", content)
 
     def test_apply_is_atomic_no_tmp_file_left(self):
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()
-        files = os.listdir(self.tmpdir)
+        self.bl.apply()
+        # The atomic_write creates path+".tmp" then renames it; verify it is gone
+        tmp_path = self._hosts_file + ".tmp"
         self.assertFalse(
-            any(f.endswith(".breaktimer-tmp") for f in files),
+            os.path.exists(tmp_path),
             "atomic write must leave no temp file behind",
         )
 
     def test_write_failure_logs_warning_once(self):
         _set_always(self.tmpdir, "example.com\n")
-        with mock.patch.object(blocklist, "_write_hosts", return_value=OSError("permission denied")):
+        with mock.patch("status.atomic_write", side_effect=OSError("permission denied")):
             with self.assertLogs("breaktimer.blocklist", level="WARNING") as cm:
-                blocklist.apply()
-                blocklist.apply()  # second call must stay silent
+                self.bl.apply()
+                self.bl.apply()  # second call must stay silent
         self.assertEqual(len([m for m in cm.output if "cannot write" in m]), 1)
 
     def test_write_failure_does_not_update_last_written(self):
         _set_always(self.tmpdir, "example.com\n")
-        with mock.patch.object(blocklist, "_write_hosts", return_value=OSError("denied")):
-            blocklist.apply()
-        self.assertIsNone(blocklist._last_written)
+        with mock.patch("status.atomic_write", side_effect=OSError("denied")):
+            self.bl.apply()
+        self.assertIsNone(self.bl._last_written)
 
     def test_write_failure_recovery_logs_again(self):
         """After a write failure, a successful write must still log the action."""
         _set_always(self.tmpdir, "example.com\n")
-        with mock.patch.object(blocklist, "_write_hosts", return_value=OSError("denied")):
-            blocklist.apply()
+        with mock.patch("status.atomic_write", side_effect=OSError("denied")):
+            self.bl.apply()
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply()
+            self.bl.apply()
         self.assertTrue(any("sinkholed" in m for m in cm.output))
 
     def test_mtime_recorded_after_write(self):
         """After a successful apply(), _last_written_mtime_ns must be set."""
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()
-        self.assertIsNotNone(blocklist._last_written_mtime_ns)
+        self.bl.apply()
+        self.assertIsNotNone(self.bl._last_written_mtime_ns)
 
     def test_external_modification_triggers_warning_and_restore(self):
         """If /etc/hosts mtime changes between apply() calls, log WARNING and rewrite."""
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()
+        self.bl.apply()
         # Simulate external edit: touch the file to bump its mtime.
         import time as _time
         _time.sleep(0.01)  # ensure mtime changes on filesystems with coarse resolution
-        with open(self._hosts, "a") as f:
+        with open(self._hosts_file, "a") as f:
             f.write("# external edit\n")
         with self.assertLogs("breaktimer.blocklist", level="WARNING") as cm:
-            blocklist.apply()
+            self.bl.apply()
         self.assertTrue(any("modified externally" in m for m in cm.output))
         # Block must be restored in the file.
-        with open(self._hosts) as f:
+        with open(self._hosts_file) as f:
             content = f.read()
         self.assertIn("0.0.0.0 example.com", content)
 
     def test_no_warning_when_mtime_unchanged(self):
         """No tamper warning when mtime hasn't changed."""
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()
+        self.bl.apply()
         # Second apply with same domains and unchanged mtime — must be silent.
         with self.assertNoLogs("breaktimer.blocklist", level="WARNING"):
-            blocklist.apply()
+            self.bl.apply()
 
     def test_mtime_updated_after_tamper_restore(self):
         """After a tamper-triggered rewrite, mtime is refreshed so next tick is quiet."""
         _set_always(self.tmpdir, "example.com\n")
-        blocklist.apply()
+        self.bl.apply()
         import time as _time
         _time.sleep(0.01)
-        with open(self._hosts, "a") as f:
+        with open(self._hosts_file, "a") as f:
             f.write("# external edit\n")
         with self.assertLogs("breaktimer.blocklist", level="WARNING"):
-            blocklist.apply()
+            self.bl.apply()
         # Now mtime is fresh; a third apply must not warn again.
         with self.assertNoLogs("breaktimer.blocklist", level="WARNING"):
-            blocklist.apply()
+            self.bl.apply()
 
 
 # ---------------------------------------------------------------------------
@@ -318,50 +313,43 @@ class TestTiers(InTempDir):
 
     def setUp(self):
         super().setUp()
-        self._hosts = os.path.join(self.tmpdir, "hosts")
-        with open(self._hosts, "w") as f:
+        with open(self._hosts_file, "w") as f:
             f.write("127.0.0.1 localhost\n")
-        self._hosts_patch = mock.patch.object(blocklist, "HOSTS_PATH", self._hosts)
-        self._hosts_patch.start()
-
-    def tearDown(self):
-        self._hosts_patch.stop()
-        super().tearDown()
 
     def _hosts_content(self):
-        with open(self._hosts) as f:
+        with open(self._hosts_file) as f:
             return f.read()
 
     def test_always_blocked_regardless_of_is_active_and_strict(self):
         _set_always(self.tmpdir, "gambling.com\n")
-        blocklist.apply(is_active=False, strict=False)
+        self.bl.apply(is_active=False, strict=False)
         self.assertIn("gambling.com", self._hosts_content())
 
     def test_active_tier_blocked_when_is_active_true(self):
         _set_active(self.tmpdir, "reddit.com\n")
-        blocklist.apply(is_active=True, strict=False)
+        self.bl.apply(is_active=True, strict=False)
         self.assertIn("reddit.com", self._hosts_content())
 
     def test_active_tier_NOT_blocked_when_is_active_false(self):
         _set_active(self.tmpdir, "reddit.com\n")
-        blocklist.apply(is_active=False, strict=False)
+        self.bl.apply(is_active=False, strict=False)
         self.assertNotIn("reddit.com", self._hosts_content())
 
     def test_strict_tier_blocked_when_strict_true(self):
         _set_strict(self.tmpdir, "youtube.com\n")
-        blocklist.apply(is_active=False, strict=True)
+        self.bl.apply(is_active=False, strict=True)
         self.assertIn("youtube.com", self._hosts_content())
 
     def test_strict_tier_NOT_blocked_when_strict_false(self):
         _set_strict(self.tmpdir, "youtube.com\n")
-        blocklist.apply(is_active=False, strict=False)
+        self.bl.apply(is_active=False, strict=False)
         self.assertNotIn("youtube.com", self._hosts_content())
 
     def test_all_three_tiers_combined(self):
         _set_always(self.tmpdir, "gambling.com\n")
         _set_active(self.tmpdir, "reddit.com\n")
         _set_strict(self.tmpdir, "youtube.com\n")
-        blocklist.apply(is_active=True, strict=True)
+        self.bl.apply(is_active=True, strict=True)
         content = self._hosts_content()
         self.assertIn("gambling.com", content)
         self.assertIn("reddit.com", content)
@@ -371,36 +359,36 @@ class TestTiers(InTempDir):
         """Transitioning from idle to active must add work-session domains."""
         _set_active(self.tmpdir, "twitter.com\n")
         # Start idle — active sites not blocked
-        blocklist.apply(is_active=False, strict=False)
+        self.bl.apply(is_active=False, strict=False)
         self.assertNotIn("twitter.com", self._hosts_content())
         # Now active — active sites blocked
-        blocklist._last_written = None
-        blocklist.apply(is_active=True, strict=False)
+        self.bl._last_written = None
+        self.bl.apply(is_active=True, strict=False)
         self.assertIn("twitter.com", self._hosts_content())
 
     def test_active_tier_removed_on_break(self):
         """Going idle (break) must lift work-session blocks."""
         _set_active(self.tmpdir, "twitter.com\n")
-        blocklist.apply(is_active=True, strict=False)
+        self.bl.apply(is_active=True, strict=False)
         self.assertIn("twitter.com", self._hosts_content())
-        blocklist._last_written = None
-        blocklist.apply(is_active=False, strict=False)
+        self.bl._last_written = None
+        self.bl.apply(is_active=False, strict=False)
         self.assertNotIn("twitter.com", self._hosts_content())
 
     def test_strict_tier_added_when_daily_limit_reached(self):
         """Crossing the daily limit must apply strict domains."""
         _set_strict(self.tmpdir, "news.ycombinator.com\n")
-        blocklist.apply(is_active=False, strict=False)
+        self.bl.apply(is_active=False, strict=False)
         self.assertNotIn("news.ycombinator.com", self._hosts_content())
-        blocklist._last_written = None
-        blocklist.apply(is_active=False, strict=True)
+        self.bl._last_written = None
+        self.bl.apply(is_active=False, strict=True)
         self.assertIn("news.ycombinator.com", self._hosts_content())
 
     def test_domain_in_multiple_tiers_appears_once(self):
         """A domain present in both always and active must appear exactly once."""
         _set_always(self.tmpdir, "example.com\n")
         _set_active(self.tmpdir, "example.com\n")
-        blocklist.apply(is_active=True, strict=False)
+        self.bl.apply(is_active=True, strict=False)
         content = self._hosts_content()
         self.assertEqual(content.count("0.0.0.0 example.com"), 1)
 
@@ -408,7 +396,7 @@ class TestTiers(InTempDir):
         _set_always(self.tmpdir, "gambling.com\n")
         _set_active(self.tmpdir, "reddit.com\n")
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply(is_active=True, strict=False)
+            self.bl.apply(is_active=True, strict=False)
         log_text = "\n".join(cm.output)
         self.assertIn("always:", log_text)
         self.assertIn("active:", log_text)
@@ -416,23 +404,24 @@ class TestTiers(InTempDir):
     def test_log_strict_tier_label(self):
         _set_strict(self.tmpdir, "youtube.com\n")
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply(is_active=False, strict=True)
+            self.bl.apply(is_active=False, strict=True)
         self.assertTrue(any("strict:" in m for m in cm.output))
 
     def test_no_block_when_all_tiers_empty_and_inactive(self):
         """No /etc/hosts block written when all files absent and tier flags off."""
-        blocklist.apply(is_active=False, strict=False)
-        content = self._hosts_content()
+        self.bl.apply(is_active=False, strict=False)
+        with open(self._hosts_file) as f:
+            content = f.read()
         self.assertNotIn("BEGIN breaktimer-blocklist", content)
 
     def test_idempotent_across_consistent_tier_calls(self):
         """Repeated apply() with same tiers must not rewrite the file."""
         _set_always(self.tmpdir, "a.com\n")
         _set_active(self.tmpdir, "b.com\n")
-        blocklist.apply(is_active=True, strict=False)
-        mtime1 = os.stat(self._hosts).st_mtime_ns
-        blocklist.apply(is_active=True, strict=False)
-        mtime2 = os.stat(self._hosts).st_mtime_ns
+        self.bl.apply(is_active=True, strict=False)
+        mtime1 = os.stat(self._hosts_file).st_mtime_ns
+        self.bl.apply(is_active=True, strict=False)
+        mtime2 = os.stat(self._hosts_file).st_mtime_ns
         self.assertEqual(mtime1, mtime2)
 
 
@@ -446,20 +435,13 @@ class TestBlocklistActionTrail(InTempDir):
 
     def setUp(self):
         super().setUp()
-        self._hosts = os.path.join(self.tmpdir, "hosts")
-        with open(self._hosts, "w") as f:
+        with open(self._hosts_file, "w") as f:
             f.write("127.0.0.1 localhost\n")
-        self._hosts_patch = mock.patch.object(blocklist, "HOSTS_PATH", self._hosts)
-        self._hosts_patch.start()
-
-    def tearDown(self):
-        self._hosts_patch.stop()
-        super().tearDown()
 
     def test_every_domain_appears_in_log(self):
         _set_always(self.tmpdir, "alpha.com\nbeta.com\n")
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply()
+            self.bl.apply()
         log_text = "\n".join(cm.output)
         self.assertIn("alpha.com", log_text)
         self.assertIn("beta.com", log_text)
@@ -467,13 +449,13 @@ class TestBlocklistActionTrail(InTempDir):
     def test_domain_count_appears_in_log(self):
         _set_always(self.tmpdir, "a.com\nb.com\nc.com\n")
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply()
+            self.bl.apply()
         self.assertTrue(any("3 domain" in m for m in cm.output))
 
     def test_active_domains_appear_in_log(self):
         _set_active(self.tmpdir, "twitter.com\n")
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply(is_active=True)
+            self.bl.apply(is_active=True)
         self.assertTrue(any("twitter.com" in m for m in cm.output))
 
 
@@ -482,34 +464,27 @@ class TestScheduleTierApply(InTempDir):
 
     def setUp(self):
         super().setUp()
-        self._hosts = os.path.join(self.tmpdir, "hosts")
-        with open(self._hosts, "w") as f:
+        with open(self._hosts_file, "w") as f:
             f.write("127.0.0.1 localhost\n")
-        self._hosts_patch = mock.patch.object(blocklist, "HOSTS_PATH", self._hosts)
-        self._hosts_patch.start()
-
-    def tearDown(self):
-        self._hosts_patch.stop()
-        super().tearDown()
 
     def _hosts_content(self):
-        with open(self._hosts) as f:
+        with open(self._hosts_file) as f:
             return f.read()
 
     def test_schedule_domains_blocked_during_active_window(self):
         _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
-        blocklist.apply(_now_min=12 * 60)
+        self.bl.apply(_now_min=12 * 60)
         self.assertIn("schedule.com", self._hosts_content())
 
     def test_schedule_domains_not_blocked_outside_window(self):
         _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
-        blocklist.apply(_now_min=20 * 60)
+        self.bl.apply(_now_min=20 * 60)
         self.assertNotIn("schedule.com", self._hosts_content())
 
     def test_schedule_tier_combined_with_always(self):
         _set_always(self.tmpdir, "always.com\n")
         _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
-        blocklist.apply(_now_min=12 * 60)
+        self.bl.apply(_now_min=12 * 60)
         content = self._hosts_content()
         self.assertIn("always.com", content)
         self.assertIn("schedule.com", content)
@@ -517,40 +492,40 @@ class TestScheduleTierApply(InTempDir):
     def test_schedule_domain_in_always_appears_once(self):
         _set_always(self.tmpdir, "dup.com\n")
         _set_schedule(self.tmpdir, "# 09:00-17:00\ndup.com\n")
-        blocklist.apply(_now_min=12 * 60)
+        self.bl.apply(_now_min=12 * 60)
         self.assertEqual(self._hosts_content().count("0.0.0.0 dup.com"), 1)
 
     def test_schedule_tier_label_in_log(self):
         _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply(_now_min=12 * 60)
+            self.bl.apply(_now_min=12 * 60)
         self.assertTrue(any("schedule:" in m for m in cm.output))
 
     def test_schedule_domain_appears_in_log(self):
         _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply(_now_min=12 * 60)
+            self.bl.apply(_now_min=12 * 60)
         self.assertTrue(any("schedule.com" in m for m in cm.output))
 
     def test_schedule_independent_of_is_active(self):
         """Schedule tier fires even when is_active=False."""
         _set_schedule(self.tmpdir, "# 09:00-17:00\nquiet.com\n")
-        blocklist.apply(is_active=False, _now_min=12 * 60)
+        self.bl.apply(is_active=False, _now_min=12 * 60)
         self.assertIn("quiet.com", self._hosts_content())
 
     def test_schedule_independent_of_strict(self):
         """Schedule tier fires even when strict=False."""
         _set_schedule(self.tmpdir, "# 09:00-17:00\nquiet.com\n")
-        blocklist.apply(strict=False, _now_min=12 * 60)
+        self.bl.apply(strict=False, _now_min=12 * 60)
         self.assertIn("quiet.com", self._hosts_content())
 
     def test_schedule_block_lifted_when_window_passes(self):
         """Domains are unblocked automatically when the window ends."""
         _set_schedule(self.tmpdir, "# 09:00-17:00\nschedule.com\n")
-        blocklist.apply(_now_min=12 * 60)           # inside window
+        self.bl.apply(_now_min=12 * 60)           # inside window
         self.assertIn("schedule.com", self._hosts_content())
-        blocklist._last_written = None              # simulate tick at a later time
-        blocklist.apply(_now_min=20 * 60)           # outside window
+        self.bl._last_written = None              # simulate tick at a later time
+        self.bl.apply(_now_min=20 * 60)           # outside window
         self.assertNotIn("schedule.com", self._hosts_content())
 
 
@@ -558,12 +533,23 @@ class TestScheduleTierApply(InTempDir):
 # Integration with main.py dispatch
 # ---------------------------------------------------------------------------
 
+class _NoopBlocker:
+    def apply(self, **kw): pass
+    def cleanup(self): pass
+
+
 class TestBlocklistIntegration(unittest.TestCase):
     """apply() is dispatched via the effects worker with timer state baked in.
 
     Blocking (_apply_blocking) runs every tick; hardware adjustments
     (_apply_hardware_adjustments) run every 10 s — the two paths are separate.
     """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
 
     def test_blocking_dispatched_every_tick(self):
         """_apply_blocking must dispatch blocklist + app_blocking on every call."""
@@ -579,7 +565,9 @@ class TestBlocklistIntegration(unittest.TestCase):
         monitor.get_last_activity_time.return_value = time.monotonic()
 
         loop = TimerLoop(state, 0, monitor, TimerConfig(3600, 1200, 8 * 3600, 10 * 3600),
-                         dispatch=dispatched.append)
+                         dispatch=dispatched.append,
+                         blocklist=_NoopBlocker(), app_blocker=_NoopBlocker(),
+                         firewall=_NoopBlocker())
 
         loop._apply_blocking()
 
@@ -588,7 +576,7 @@ class TestBlocklistIntegration(unittest.TestCase):
                          "expected 3 dispatched effects: blocklist, app_blocking, firewall")
 
     def test_blocklist_effect_calls_apply_with_timer_state(self):
-        """The dispatched blocklist lambda must invoke blocklist.apply with is_active and strict."""
+        """The dispatched blocklist lambda must invoke bl.apply with is_active and strict."""
         import main
         from main import TimerState, TimerLoop, TimerConfig
         import time
@@ -601,14 +589,17 @@ class TestBlocklistIntegration(unittest.TestCase):
         monitor.is_healthy.return_value = True
         monitor.get_last_activity_time.return_value = time.monotonic()
 
+        bl = blocklist.Blocklist(self._tmp.name)
         loop = TimerLoop(state, 0, monitor, TimerConfig(3600, 1200, 8 * 3600, 10 * 3600),
-                         dispatch=dispatched.append)
+                         dispatch=dispatched.append,
+                         blocklist=bl, app_blocker=_NoopBlocker(),
+                         firewall=_NoopBlocker())
 
         loop._apply_blocking()
 
-        # Call the blocklist effect (first of two) and verify timer state forwarded
+        # Call the blocklist effect (first of three) and verify timer state forwarded
         blocklist_effect = dispatched[0]
-        with mock.patch.object(blocklist, "apply") as mock_apply:
+        with mock.patch.object(bl, "apply") as mock_apply:
             blocklist_effect()
         mock_apply.assert_called_once_with(is_active=True, strict=False)
 
@@ -628,13 +619,16 @@ class TestBlocklistIntegration(unittest.TestCase):
         monitor.is_healthy.return_value = True
         monitor.get_last_activity_time.return_value = time.monotonic()
 
+        bl = blocklist.Blocklist(self._tmp.name)
         loop = TimerLoop(state, 0, monitor, TimerConfig(3600, 1200, 8 * 3600, 10 * 3600),
-                         dispatch=dispatched.append)
+                         dispatch=dispatched.append,
+                         blocklist=bl, app_blocker=_NoopBlocker(),
+                         firewall=_NoopBlocker())
 
         loop._apply_blocking()
 
         blocklist_effect = dispatched[0]
-        with mock.patch.object(blocklist, "apply") as mock_apply:
+        with mock.patch.object(bl, "apply") as mock_apply:
             blocklist_effect()
         _, kwargs = mock_apply.call_args
         self.assertTrue(kwargs["strict"], "strict must be True when refill_multiplier=0")
@@ -649,32 +643,25 @@ class TestDoHSinkholing(InTempDir):
 
     def setUp(self):
         super().setUp()
-        self._hosts = os.path.join(self.tmpdir, "hosts")
-        with open(self._hosts, "w") as f:
+        with open(self._hosts_file, "w") as f:
             f.write("127.0.0.1 localhost\n")
-        self._hosts_patch = mock.patch.object(blocklist, "HOSTS_PATH", self._hosts)
-        self._hosts_patch.start()
         # Re-enable DoH sinkholing for this test class (InTempDir.setUp disabled it).
-        blocklist.DOH_SERVER_DOMAINS = frozenset(["dns.google", "cloudflare-dns.com"])
-
-    def tearDown(self):
-        self._hosts_patch.stop()
-        super().tearDown()
+        self.bl.doh_domains = frozenset(["dns.google", "cloudflare-dns.com"])
 
     def _hosts_content(self):
-        with open(self._hosts) as f:
+        with open(self._hosts_file) as f:
             return f.read()
 
     def test_doh_domains_added_when_any_domain_blocked(self):
         _set_always(self.tmpdir, "reddit.com\n")
-        blocklist.apply()
+        self.bl.apply()
         content = self._hosts_content()
         self.assertIn("dns.google", content)
         self.assertIn("cloudflare-dns.com", content)
 
     def test_doh_domains_not_added_when_no_domains_blocked(self):
         # All tier files empty/absent — no blocks, no DoH sinkholing either.
-        blocklist.apply()
+        self.bl.apply()
         content = self._hosts_content()
         self.assertNotIn("dns.google", content)
         self.assertNotIn("cloudflare-dns.com", content)
@@ -682,22 +669,22 @@ class TestDoHSinkholing(InTempDir):
     def test_doh_tier_label_in_log(self):
         _set_always(self.tmpdir, "reddit.com\n")
         with self.assertLogs("breaktimer.blocklist", level="INFO") as cm:
-            blocklist.apply()
+            self.bl.apply()
         self.assertTrue(any("doh:" in m for m in cm.output))
 
     def test_doh_not_added_when_doh_set_empty(self):
-        """Setting DOH_SERVER_DOMAINS=frozenset() disables auto-sinkholing."""
-        blocklist.DOH_SERVER_DOMAINS = frozenset()
+        """Setting doh_domains=frozenset() disables auto-sinkholing."""
+        self.bl.doh_domains = frozenset()
         _set_always(self.tmpdir, "reddit.com\n")
-        blocklist.apply()
+        self.bl.apply()
         content = self._hosts_content()
         self.assertNotIn("dns.google", content)
 
     def test_user_domain_in_doh_set_appears_once(self):
         """If a user adds a DoH provider to their own blocklist, no duplicate entry."""
-        blocklist.DOH_SERVER_DOMAINS = frozenset(["dns.google"])
+        self.bl.doh_domains = frozenset(["dns.google"])
         _set_always(self.tmpdir, "dns.google\n")
-        blocklist.apply()
+        self.bl.apply()
         self.assertEqual(self._hosts_content().count("0.0.0.0 dns.google"), 1)
 
 

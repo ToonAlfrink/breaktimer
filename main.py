@@ -269,7 +269,8 @@ class TimerLoop:
     MAX_TICK_SECONDS = SECONDS_PER_MINUTE
 
     def __init__(self, state, offline_duration_seconds, activity_monitor, config: TimerConfig,
-                 dispatch=run_effect_inline, save_fn=None):
+                 dispatch=run_effect_inline, save_fn=None,
+                 blocklist=None, app_blocker=None, firewall=None):
         self.state = state
         self.activity_monitor = activity_monitor
         # How blocking side effects leave the timer thread. Defaults to inline
@@ -278,6 +279,9 @@ class TimerLoop:
         self._dispatch = dispatch
         self._config = config
         self._save = save_fn or (lambda: None)
+        self._blocklist = blocklist
+        self._app_blocker = app_blocker
+        self._firewall = firewall
         # All in-process timing is monotonic so NTP steps / suspend can't warp it.
         self.last_loop_time = time.monotonic() - offline_duration_seconds
         self.last_save_time = time.monotonic()
@@ -398,9 +402,8 @@ class TimerLoop:
         """Dispatch domain/app/firewall blocking every tick (1 Hz) to close the tamper window."""
         is_active = self.state.is_active
         strict = self._refill_multiplier() <= 0
-        self._dispatch(lambda: blocklist.apply(is_active=is_active, strict=strict))
-        self._dispatch(lambda: app_blocking.apply(is_active=is_active, strict=strict))
-        self._dispatch(lambda: firewall.apply(is_active=is_active, strict=strict))
+        for b in filter(None, (self._blocklist, self._app_blocker, self._firewall)):
+            self._dispatch(lambda b=b: b.apply(is_active=is_active, strict=strict))
 
     def _apply_hardware_adjustments(self, remaining_fraction, current_loop_time):
         """Dispatch slow hardware side effects (brightness, sensitivity) every 10 s."""
@@ -568,8 +571,9 @@ def main():
         sys.exit(1)
 
     args = parse_arguments()
-    blocklist.init(state_dir)
-    app_blocking.init(state_dir)
+    bl = blocklist.Blocklist(state_dir)
+    ab = app_blocking.AppBlocker(state_dir)
+    fw = firewall.Firewall()
     cfg = TimerConfig(
         mana_max_seconds=args.deplete_minutes * SECONDS_PER_MINUTE,
         mana_replenish_seconds=args.replenish_minutes * SECONDS_PER_MINUTE,
@@ -600,6 +604,9 @@ def main():
             cfg,
             dispatch=effects.submit,
             save_fn=lambda: state.save(state_file),
+            blocklist=bl,
+            app_blocker=ab,
+            firewall=fw,
         )
         timer_loop.run()
 
@@ -608,7 +615,7 @@ def main():
     finally:
         activity_monitor.stop()
         restore_sensitivity(original_sensitivity)
-        firewall.cleanup()
+        fw.cleanup()
 
 if __name__ == "__main__":
     main() 

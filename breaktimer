@@ -51,8 +51,8 @@ def cmd_brightness_on():
 
 
 def cmd_blocklist():
-    blocklist.init(status.state_dir())
-    app_blocking.init(status.state_dir())
+    bl = blocklist.Blocklist(status.state_dir())
+    ab = app_blocking.AppBlocker(status.state_dir())
 
     snap = status.Snapshot.read(max_age_seconds=10)
     is_active = snap.is_active if snap else False
@@ -70,8 +70,8 @@ def cmd_blocklist():
     def _fmt_apps(names):
         return [f"    {n}  →  SIGTERM→SIGKILL" for n in names]
 
-    t  = blocklist._tiers
-    at = app_blocking._tiers
+    t  = bl.tiers
+    at = ab.tiers
     always   = status.read_items(t.always)
     active   = status.read_items(t.active)
     strict_  = status.read_items(t.strict)

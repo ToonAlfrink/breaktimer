@@ -2,6 +2,8 @@ import logging
 import os
 import re
 
+import status
+
 log = logging.getLogger("breaktimer.mouse")
 
 CONFIG_DEFAULT_FILE = os.path.expanduser(
@@ -42,10 +44,7 @@ def _write_speed_to_file(path, value):
 
     content = re.sub(r"speed:\s*-?[\d.]+", f"speed: {value}", content)
 
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        f.write(content)
-    os.replace(tmp, path)
+    status.atomic_write(path, content)
 
 
 # Last speed actually written, so the why-it-acted log records each real change

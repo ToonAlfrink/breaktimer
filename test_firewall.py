@@ -33,11 +33,13 @@ def _run_missing(*args, **kwargs):
 
 
 class _FirewallTest(unittest.TestCase):
-    """Reset module-level state before each test."""
+    """Create a fresh Firewall instance before each test."""
 
     def setUp(self):
-        firewall._rules_installed = False
-        firewall._apply_failed = False
+        self.fw = firewall.Firewall(
+            doh_ips=firewall.DOH_SERVER_IPS,
+            doh_ips6=firewall.DOH_SERVER_IPS6,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -48,64 +50,60 @@ class TestFirewallApply(_FirewallTest):
     def test_installs_rules_on_first_apply(self):
         with mock.patch("firewall._install_rules") as m_install, \
              mock.patch("firewall._table_exists", return_value=True):
-            firewall.apply()
+            self.fw.apply()
         m_install.assert_called_once()
-        self.assertTrue(firewall._rules_installed)
+        self.assertTrue(self.fw._rules_installed)
 
     def test_noop_when_table_exists(self):
-        firewall._rules_installed = True
+        self.fw._rules_installed = True
         with mock.patch("firewall._table_exists", return_value=True) as m_check, \
              mock.patch("firewall._install_rules") as m_install:
-            firewall.apply()
+            self.fw.apply()
         m_install.assert_not_called()
         m_check.assert_called_once()
 
     def test_restores_rules_when_table_deleted(self):
-        firewall._rules_installed = True
+        self.fw._rules_installed = True
         with mock.patch("firewall._table_exists", return_value=False), \
              mock.patch("firewall._install_rules") as m_install:
-            firewall.apply()
+            self.fw.apply()
         m_install.assert_called_once()
-        self.assertTrue(firewall._rules_installed)
+        self.assertTrue(self.fw._rules_installed)
 
     def test_noop_when_apply_failed(self):
-        firewall._apply_failed = True
+        self.fw._apply_failed = True
         with mock.patch("firewall._install_rules") as m_install, \
              mock.patch("firewall._table_exists") as m_check:
-            firewall.apply()
+            self.fw.apply()
         m_install.assert_not_called()
         m_check.assert_not_called()
 
     def test_noop_when_doh_ips_empty(self):
-        orig = firewall.DOH_SERVER_IPS
-        firewall.DOH_SERVER_IPS = frozenset()
-        try:
-            with mock.patch("firewall._install_rules") as m_install:
-                firewall.apply()
-            m_install.assert_not_called()
-        finally:
-            firewall.DOH_SERVER_IPS = orig
+        fw = firewall.Firewall(doh_ips=frozenset())
+        with mock.patch("firewall._install_rules") as m_install:
+            fw.apply()
+        m_install.assert_not_called()
 
     def test_graceful_when_nft_missing(self):
         with mock.patch("firewall._install_rules",
                         side_effect=FileNotFoundError("nft not found")):
-            firewall.apply()  # must not raise
-        self.assertFalse(firewall._rules_installed)
-        self.assertTrue(firewall._apply_failed)
+            self.fw.apply()  # must not raise
+        self.assertFalse(self.fw._rules_installed)
+        self.assertTrue(self.fw._apply_failed)
 
     def test_graceful_when_permission_denied(self):
         err = subprocess.CalledProcessError(1, ["nft"], stderr="Operation not permitted")
         with mock.patch("firewall._install_rules", side_effect=err):
-            firewall.apply()  # must not raise
-        self.assertFalse(firewall._rules_installed)
-        self.assertTrue(firewall._apply_failed)
+            self.fw.apply()  # must not raise
+        self.assertFalse(self.fw._rules_installed)
+        self.assertTrue(self.fw._apply_failed)
 
     def test_warns_once_on_repeated_nft_missing(self):
         with mock.patch("firewall._install_rules",
                         side_effect=FileNotFoundError("nft not found")), \
              self.assertLogs("breaktimer.firewall", level="WARNING") as cm:
-            firewall.apply()
-            firewall.apply()
+            self.fw.apply()
+            self.fw.apply()
         warns = [m for m in cm.output if "WARNING" in m]
         self.assertEqual(len(warns), 1, "expected exactly one warning, got: %s" % warns)
 
@@ -113,8 +111,8 @@ class TestFirewallApply(_FirewallTest):
         err = subprocess.CalledProcessError(1, ["nft"], stderr="denied")
         with mock.patch("firewall._install_rules", side_effect=err), \
              self.assertLogs("breaktimer.firewall", level="WARNING") as cm:
-            firewall.apply()
-            firewall.apply()
+            self.fw.apply()
+            self.fw.apply()
         warns = [m for m in cm.output if "WARNING" in m]
         self.assertEqual(len(warns), 1)
 
@@ -122,25 +120,25 @@ class TestFirewallApply(_FirewallTest):
         """apply() is interface-compatible with blocklist.apply()."""
         with mock.patch("firewall._install_rules"), \
              mock.patch("firewall._table_exists", return_value=True):
-            firewall.apply(is_active=True, strict=True)  # must not raise
-        self.assertTrue(firewall._rules_installed)
+            self.fw.apply(is_active=True, strict=True)  # must not raise
+        self.assertTrue(self.fw._rules_installed)
 
     def test_log_trail_on_install(self):
         with mock.patch("firewall._install_rules"), \
              mock.patch("firewall._table_exists", return_value=True), \
              self.assertLogs("breaktimer.firewall", level="INFO") as cm:
-            firewall.apply()
+            self.fw.apply()
         self.assertTrue(
             any("installed" in m and "DoH" in m for m in cm.output),
             cm.output,
         )
 
     def test_log_trail_on_tamper_detection(self):
-        firewall._rules_installed = True
+        self.fw._rules_installed = True
         with mock.patch("firewall._table_exists", return_value=False), \
              mock.patch("firewall._install_rules"), \
              self.assertLogs("breaktimer.firewall", level="WARNING") as cm:
-            firewall.apply()
+            self.fw.apply()
         self.assertTrue(
             any("deleted externally" in m for m in cm.output),
             cm.output,
@@ -150,14 +148,14 @@ class TestFirewallApply(_FirewallTest):
         with mock.patch("firewall._install_rules",
                         side_effect=FileNotFoundError()), \
              self.assertLogs("breaktimer.firewall", level="WARNING") as cm:
-            firewall.apply()
+            self.fw.apply()
         self.assertTrue(any("nft not found" in m for m in cm.output), cm.output)
 
     def test_log_trail_permission_denied(self):
         err = subprocess.CalledProcessError(1, ["nft"], stderr="Operation not permitted")
         with mock.patch("firewall._install_rules", side_effect=err), \
              self.assertLogs("breaktimer.firewall", level="WARNING") as cm:
-            firewall.apply()
+            self.fw.apply()
         self.assertTrue(
             any("AmbientCapabilities" in m for m in cm.output),
             cm.output,
@@ -170,35 +168,35 @@ class TestFirewallApply(_FirewallTest):
 
 class TestFirewallCleanup(_FirewallTest):
     def test_cleanup_removes_table(self):
-        firewall._rules_installed = True
+        self.fw._rules_installed = True
         with mock.patch("subprocess.run", side_effect=_run_ok) as mock_run:
-            firewall.cleanup()
-        self.assertFalse(firewall._rules_installed)
+            self.fw.cleanup()
+        self.assertFalse(self.fw._rules_installed)
         # Verify nft delete table was called
         cmds = [c.args[0] for c in mock_run.call_args_list]
         self.assertIn(["nft", "delete", "table", "inet", "breaktimer"], cmds)
 
     def test_cleanup_noop_when_not_installed(self):
         with mock.patch("subprocess.run") as mock_run:
-            firewall.cleanup()
+            self.fw.cleanup()
         mock_run.assert_not_called()
 
     def test_cleanup_graceful_on_nft_error(self):
-        firewall._rules_installed = True
+        self.fw._rules_installed = True
         with mock.patch("subprocess.run",
                         side_effect=subprocess.CalledProcessError(1, ["nft"])):
-            firewall.cleanup()  # must not raise
+            self.fw.cleanup()  # must not raise
 
     def test_cleanup_graceful_on_nft_missing(self):
-        firewall._rules_installed = True
+        self.fw._rules_installed = True
         with mock.patch("subprocess.run", side_effect=FileNotFoundError()):
-            firewall.cleanup()  # must not raise
+            self.fw.cleanup()  # must not raise
 
     def test_log_trail_on_cleanup(self):
-        firewall._rules_installed = True
+        self.fw._rules_installed = True
         with mock.patch("subprocess.run", side_effect=_run_ok), \
              self.assertLogs("breaktimer.firewall", level="INFO") as cm:
-            firewall.cleanup()
+            self.fw.cleanup()
         self.assertTrue(any("removed" in m for m in cm.output), cm.output)
 
 
@@ -257,13 +255,8 @@ class TestFirewallBuildScript(unittest.TestCase):
         self.assertIn("2606:4700:4700::1111", s)
 
     def test_no_ipv6_rules_when_ips6_empty(self):
-        orig = firewall.DOH_SERVER_IPS6
-        firewall.DOH_SERVER_IPS6 = frozenset()
-        try:
-            s = firewall._build_script()
-            self.assertNotIn("ip6", s)
-        finally:
-            firewall.DOH_SERVER_IPS6 = orig
+        s = firewall._build_script(doh_ips6=frozenset())
+        self.assertNotIn("ip6", s)
 
     def test_all_ipv4_ips_present(self):
         s = self._script()
@@ -286,7 +279,7 @@ class TestFirewallBuildScript(unittest.TestCase):
 class TestFirewallInstallRules(unittest.TestCase):
     def test_calls_nft_dash_f(self):
         with mock.patch("subprocess.run", side_effect=_run_ok) as mock_run:
-            firewall._install_rules()
+            firewall._install_rules(firewall._build_script())
         cmds = [tuple(c.args[0]) for c in mock_run.call_args_list]
         self.assertIn(("nft", "-f", "-"), cmds)
 
@@ -297,7 +290,7 @@ class TestFirewallInstallRules(unittest.TestCase):
                 captured["script"] = kwargs.get("input", "")
             return mock.MagicMock(returncode=0)
         with mock.patch("subprocess.run", side_effect=_capture):
-            firewall._install_rules()
+            firewall._install_rules(firewall._build_script())
         self.assertIn("add table inet breaktimer", captured.get("script", ""))
 
     def test_attempts_delete_before_add(self):
@@ -308,7 +301,7 @@ class TestFirewallInstallRules(unittest.TestCase):
                 return mock.MagicMock(returncode=0, stdout="", stderr="")
             return mock.MagicMock(returncode=0, stdout="", stderr="")
         with mock.patch("subprocess.run", side_effect=_track):
-            firewall._install_rules()
+            firewall._install_rules(firewall._build_script())
         # delete should precede the -f - call
         delete_idx = next(
             (i for i, c in enumerate(calls) if "delete" in c), None
@@ -327,9 +320,9 @@ class TestFirewallInstallRules(unittest.TestCase):
             return mock.MagicMock(returncode=0)
         with mock.patch("subprocess.run", side_effect=_side):
             with self.assertRaises(subprocess.CalledProcessError):
-                firewall._install_rules()
+                firewall._install_rules(firewall._build_script())
 
     def test_raises_when_nft_missing(self):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError()):
             with self.assertRaises(FileNotFoundError):
-                firewall._install_rules()
+                firewall._install_rules(firewall._build_script())

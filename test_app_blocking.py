@@ -135,16 +135,15 @@ class TestApplyTiers(unittest.TestCase):
         write("blocklist-apps-active.txt",   "discord\n")
         write("blocklist-apps-strict.txt",   "spotify\n")
         write("blocklist-apps-schedule.txt", "# 09:00-17:00\nvlc\n")
-        app_blocking.init(d)
+        self.ab = app_blocking.AppBlocker(d)
 
     def tearDown(self):
         self.dir.cleanup()
-        app_blocking._tiers = None
 
     def _apply(self, is_active, strict, now_min=600):
         with patch.object(app_blocking, "_find_pids", return_value=[]) as mock_find, \
              patch.object(app_blocking, "_send_signal"):
-            app_blocking.apply(is_active=is_active, strict=strict, _now_min=now_min)
+            self.ab.apply(is_active=is_active, strict=strict, _now_min=now_min)
             return mock_find.call_args_list
 
     def test_always_tier_always_included(self):
@@ -193,7 +192,7 @@ class TestApplyTiers(unittest.TestCase):
     def test_no_kill_when_no_pids(self):
         with patch.object(app_blocking, "_find_pids", return_value=[]) as _, \
              patch.object(app_blocking, "_send_signal") as mock_sig:
-            app_blocking.apply(is_active=True, strict=True, _now_min=600)
+            self.ab.apply(is_active=True, strict=True, _now_min=600)
         mock_sig.assert_not_called()
 
 
@@ -205,19 +204,18 @@ class TestApplyKills(unittest.TestCase):
         d = self.dir.name
         path = os.path.join(d, "blocklist-apps.txt")
         _write(path, "steam\n")
-        app_blocking._tiers = TierSet(always=path, active=None, strict=None, schedule=None)
-        app_blocking._sigterm_tick.clear()
-        app_blocking._apply_count = 0
+        self.ab = app_blocking.AppBlocker(d)
+        self.ab._tiers = TierSet(always=path, active=None, strict=None, schedule=None)
+        self.ab._sigterm_tick.clear()
+        self.ab._apply_count = 0
 
     def tearDown(self):
         self.dir.cleanup()
-        app_blocking._tiers = None
-        app_blocking._sigterm_tick.clear()
 
     def test_sigterms_each_pid_on_first_apply(self):
         with patch.object(app_blocking, "_find_pids", return_value=[100, 200]), \
              patch.object(app_blocking, "_send_signal", return_value=True) as mock_sig:
-            app_blocking.apply(is_active=False, strict=False)
+            self.ab.apply(is_active=False, strict=False)
         mock_sig.assert_has_calls(
             [call(100, signal.SIGTERM), call(200, signal.SIGTERM)], any_order=False
         )
@@ -227,7 +225,7 @@ class TestApplyKills(unittest.TestCase):
         with patch.object(app_blocking, "_find_pids", return_value=[999]), \
              patch.object(app_blocking, "_send_signal", return_value=False), \
              patch.object(app_blocking.log, "info") as mock_info:
-            app_blocking.apply(is_active=False, strict=False)
+            self.ab.apply(is_active=False, strict=False)
         mock_info.assert_not_called()
 
 
@@ -245,30 +243,29 @@ class TestApplyLogTrail(unittest.TestCase):
 
         always_path = write("blocklist-apps.txt",        "steam\n")
         active_path = write("blocklist-apps-active.txt", "discord\n")
-        app_blocking._tiers = TierSet(always=always_path, active=active_path, strict=None, schedule=None)
-        app_blocking._sigterm_tick.clear()
-        app_blocking._apply_count = 0
+        self.ab = app_blocking.AppBlocker(d)
+        self.ab._tiers = TierSet(always=always_path, active=active_path, strict=None, schedule=None)
+        self.ab._sigterm_tick.clear()
+        self.ab._apply_count = 0
 
     def tearDown(self):
         self.dir.cleanup()
-        app_blocking._tiers = None
-        app_blocking._sigterm_tick.clear()
 
     def test_logs_sigterm_with_name_pid_and_tier(self):
         with patch.object(app_blocking, "_find_pids", return_value=[42]), \
              patch.object(app_blocking, "_send_signal", return_value=True), \
              self.assertLogs("breaktimer.apps", level="INFO") as cm:
-            app_blocking.apply(is_active=False, strict=False)
+            self.ab.apply(is_active=False, strict=False)
         self.assertTrue(any("steam" in line and "42" in line and "always" in line
                             for line in cm.output))
 
     def test_logs_multi_tier_name(self):
         """A name in both always and active tiers shows combined tier label."""
-        _write(app_blocking._tiers.active, "steam\n")
+        _write(self.ab._tiers.active, "steam\n")
         with patch.object(app_blocking, "_find_pids", return_value=[7]), \
              patch.object(app_blocking, "_send_signal", return_value=True), \
              self.assertLogs("breaktimer.apps", level="INFO") as cm:
-            app_blocking.apply(is_active=True, strict=False)
+            self.ab.apply(is_active=True, strict=False)
         # steam appears in always+active
         steam_lines = [l for l in cm.output if "steam" in l]
         self.assertTrue(any("always" in l and "active" in l for l in steam_lines))
@@ -277,29 +274,30 @@ class TestApplyLogTrail(unittest.TestCase):
         with patch.object(app_blocking, "_find_pids", side_effect=lambda n: [99] if n == "discord" else []), \
              patch.object(app_blocking, "_send_signal", return_value=True), \
              self.assertLogs("breaktimer.apps", level="INFO") as cm:
-            app_blocking.apply(is_active=True, strict=False)
+            self.ab.apply(is_active=True, strict=False)
         self.assertTrue(any("discord" in line and "active" in line for line in cm.output))
 
     def test_no_log_when_no_processes_running(self):
         with patch.object(app_blocking, "_find_pids", return_value=[]):
             # assertLogs would fail if no log emitted — we just verify no crash.
-            app_blocking.apply(is_active=True, strict=False)
+            self.ab.apply(is_active=True, strict=False)
 
 
 class TestApplyAllFilesAbsent(unittest.TestCase):
-    """apply() with no tier config is a no-op — no crash."""
+    """apply() with empty tier files is a no-op — no crash."""
 
     def setUp(self):
-        app_blocking._tiers = None
-        app_blocking._sigterm_tick.clear()
+        self.dir = tempfile.TemporaryDirectory()
+        # Create AppBlocker with an empty dir so all tier files are absent
+        self.ab = app_blocking.AppBlocker(self.dir.name)
 
     def tearDown(self):
-        app_blocking._sigterm_tick.clear()
+        self.dir.cleanup()
 
     def test_no_crash(self):
         with patch.object(app_blocking, "_find_pids") as mock_find, \
              patch.object(app_blocking, "_send_signal") as mock_sig:
-            app_blocking.apply(is_active=True, strict=True)
+            self.ab.apply(is_active=True, strict=True)
         mock_find.assert_not_called()
         mock_sig.assert_not_called()
 
@@ -311,14 +309,13 @@ class TestSigkillEscalation(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         path = os.path.join(self.dir.name, "blocklist-apps.txt")
         _write(path, "steam\n")
-        app_blocking._tiers = TierSet(always=path, active=None, strict=None, schedule=None)
-        app_blocking._sigterm_tick.clear()
-        app_blocking._apply_count = 0
+        self.ab = app_blocking.AppBlocker(self.dir.name)
+        self.ab._tiers = TierSet(always=path, active=None, strict=None, schedule=None)
+        self.ab._sigterm_tick.clear()
+        self.ab._apply_count = 0
 
     def tearDown(self):
         self.dir.cleanup()
-        app_blocking._tiers = None
-        app_blocking._sigterm_tick.clear()
 
     def _run(self, n, pids):
         """Call apply() n times with the given pids; return list of (sig, pid) calls."""
@@ -329,7 +326,7 @@ class TestSigkillEscalation(unittest.TestCase):
         with patch.object(app_blocking, "_find_pids", return_value=pids), \
              patch.object(app_blocking, "_send_signal", side_effect=mock_send):
             for _ in range(n):
-                app_blocking.apply(is_active=False, strict=False)
+                self.ab.apply(is_active=False, strict=False)
         return delivered
 
     def test_sigterm_on_first_apply(self):
@@ -342,29 +339,29 @@ class TestSigkillEscalation(unittest.TestCase):
         self.assertEqual([c for c in calls if c[0] == signal.SIGTERM], [(signal.SIGTERM, 42)])
 
     def test_no_sigkill_before_delay(self):
-        calls = self._run(app_blocking.SIGKILL_DELAY_TICKS, [42])
+        calls = self._run(app_blocking.AppBlocker.SIGKILL_DELAY_TICKS, [42])
         self.assertNotIn(signal.SIGKILL, [s for s, _ in calls])
 
     def test_sigkill_after_delay(self):
-        calls = self._run(app_blocking.SIGKILL_DELAY_TICKS + 1, [42])
+        calls = self._run(app_blocking.AppBlocker.SIGKILL_DELAY_TICKS + 1, [42])
         self.assertIn(signal.SIGKILL, [s for s, _ in calls])
 
     def test_sigkill_log_says_survived_sigterm(self):
-        n = app_blocking.SIGKILL_DELAY_TICKS + 1
+        n = app_blocking.AppBlocker.SIGKILL_DELAY_TICKS + 1
         with patch.object(app_blocking, "_find_pids", return_value=[99]), \
              patch.object(app_blocking, "_send_signal", return_value=True), \
              self.assertLogs("breaktimer.apps", level="INFO") as cm:
             for _ in range(n):
-                app_blocking.apply(is_active=False, strict=False)
+                self.ab.apply(is_active=False, strict=False)
         self.assertTrue(any("SIGKILL" in l and "survived SIGTERM" in l for l in cm.output))
 
     def test_state_cleared_when_pid_gone(self):
         """If a PID disappears from running processes, escalation state is cleaned up."""
         self._run(1, [42])
-        self.assertIn(42, app_blocking._sigterm_tick)
+        self.assertIn(42, self.ab._sigterm_tick)
 
         self._run(1, [])  # pid 42 gone
-        self.assertNotIn(42, app_blocking._sigterm_tick)
+        self.assertNotIn(42, self.ab._sigterm_tick)
 
     def test_sigterm_restarts_after_pid_reappears(self):
         """If a PID goes away then comes back, SIGTERM is sent again (not SIGKILL)."""
@@ -375,9 +372,9 @@ class TestSigkillEscalation(unittest.TestCase):
 
     def test_state_cleared_after_sigkill(self):
         """After SIGKILL, _sigterm_tick entry is removed so the next tick starts fresh."""
-        n = app_blocking.SIGKILL_DELAY_TICKS + 1
+        n = app_blocking.AppBlocker.SIGKILL_DELAY_TICKS + 1
         self._run(n, [42])
-        self.assertNotIn(42, app_blocking._sigterm_tick)
+        self.assertNotIn(42, self.ab._sigterm_tick)
 
     def test_multiple_pids_escalate_independently(self):
         """Each PID's escalation is tracked separately."""
@@ -387,12 +384,12 @@ class TestSigkillEscalation(unittest.TestCase):
             delivered.append((sig, pid))
             return True
 
-        delay = app_blocking.SIGKILL_DELAY_TICKS
+        delay = app_blocking.AppBlocker.SIGKILL_DELAY_TICKS
         with patch.object(app_blocking, "_send_signal", side_effect=mock_send):
             for i in range(delay + 2):
                 pids = [10, 20] if i >= 2 else [10]
                 with patch.object(app_blocking, "_find_pids", return_value=pids):
-                    app_blocking.apply(is_active=False, strict=False)
+                    self.ab.apply(is_active=False, strict=False)
 
         # pid 10 should have received SIGKILL; pid 20 joined later so still pending
         self.assertIn((signal.SIGKILL, 10), delivered)

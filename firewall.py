@@ -71,15 +71,14 @@ DOH_SERVER_IPS6: frozenset = frozenset([
     "2620:119:35::35", "2620:119:53::53",
 ])
 
-# True once the table is successfully installed; reset by cleanup() or on failure.
-_rules_installed: bool = False
-# Suppress repeated failure warnings: log once, stay quiet until restart.
-_apply_failed: bool = False
 
-
-def _build_script() -> str:
+def _build_script(doh_ips=None, doh_ips6=None) -> str:
     """Build the nft script that installs breaktimer's DoH-blocking rules."""
-    ips4 = ", ".join(sorted(DOH_SERVER_IPS))
+    if doh_ips is None:
+        doh_ips = DOH_SERVER_IPS
+    if doh_ips6 is None:
+        doh_ips6 = DOH_SERVER_IPS6
+    ips4 = ", ".join(sorted(doh_ips))
     lines = [
         f"add table inet {_TABLE}",
         f"add chain inet {_TABLE} {_CHAIN}"
@@ -89,8 +88,8 @@ def _build_script() -> str:
         f"add rule inet {_TABLE} {_CHAIN} ip daddr {{ {ips4} }}"
         " udp dport 853 drop",
     ]
-    if DOH_SERVER_IPS6:
-        ips6 = ", ".join(sorted(DOH_SERVER_IPS6))
+    if doh_ips6:
+        ips6 = ", ".join(sorted(doh_ips6))
         lines.extend([
             f"add rule inet {_TABLE} {_CHAIN} ip6 daddr {{ {ips6} }}"
             " tcp dport { 443, 853 } drop",
@@ -112,7 +111,7 @@ def _table_exists() -> bool:
         return False
 
 
-def _install_rules() -> None:
+def _install_rules(script: str) -> None:
     """Create the breaktimer nftables table and install DoH-blocking rules.
 
     Removes any stale table first so rules are always exactly what we wrote.
@@ -123,7 +122,6 @@ def _install_rules() -> None:
         ["nft", "delete", "table", "inet", _TABLE],
         capture_output=True, text=True,
     )
-    script = _build_script()
     subprocess.run(
         ["nft", "-f", "-"],
         input=script, text=True,
@@ -131,68 +129,76 @@ def _install_rules() -> None:
     )
 
 
-def apply(is_active: bool = False, strict: bool = False) -> None:
-    """Ensure nftables DoH-IP-blocking rules are in place.
+class Firewall:
+    """Manages nftables DoH-IP-blocking rules as instance state."""
 
-    is_active and strict are accepted for interface consistency with
-    blocklist.apply() and app_blocking.apply(). The firewall rules are
-    installed unconditionally while the service is running — any blocking
-    configuration benefits from firewall-level DoH bypass prevention.
+    def __init__(self, doh_ips=None, doh_ips6=None):
+        self._doh_ips = doh_ips if doh_ips is not None else DOH_SERVER_IPS
+        self._doh_ips6 = doh_ips6 if doh_ips6 is not None else DOH_SERVER_IPS6
+        # True once the table is successfully installed; reset by cleanup() or on failure.
+        self._rules_installed: bool = False
+        # Suppress repeated failure warnings: log once, stay quiet until restart.
+        self._apply_failed: bool = False
 
-    Called every tick (1 Hz). No-ops quickly when the table already exists.
-    Detects external deletion and restores rules immediately (tamper-resistance).
-    """
-    global _rules_installed, _apply_failed
+    def apply(self, is_active: bool = False, strict: bool = False) -> None:
+        """Ensure nftables DoH-IP-blocking rules are in place.
 
-    if not DOH_SERVER_IPS:
-        return  # disabled (empty frozenset; e.g. in tests)
+        is_active and strict are accepted for interface consistency with
+        blocklist.apply() and app_blocking.apply(). The firewall rules are
+        installed unconditionally while the service is running — any blocking
+        configuration benefits from firewall-level DoH bypass prevention.
 
-    if _apply_failed:
-        return  # logged once; nft absent or permission denied
+        Called every tick (1 Hz). No-ops quickly when the table already exists.
+        Detects external deletion and restores rules immediately (tamper-resistance).
+        """
+        if not self._doh_ips:
+            return  # disabled (empty frozenset; e.g. in tests)
 
-    if _rules_installed:
-        if _table_exists():
-            return  # rules still in place — nothing to do
-        log.warning(
-            "firewall: nftables table '%s' deleted externally — restoring DoH-blocking rules",
-            _TABLE,
-        )
-        _rules_installed = False
+        if self._apply_failed:
+            return  # logged once; nft absent or permission denied
 
-    try:
-        _install_rules()
-        _rules_installed = True
-        _apply_failed = False
-        log.info(
-            "firewall: installed DoH-blocking rules (%d IPv4, %d IPv6 addresses, ports 443/853)",
-            len(DOH_SERVER_IPS), len(DOH_SERVER_IPS6),
-        )
-    except FileNotFoundError:
-        _apply_failed = True
-        log.warning(
-            "firewall: nft not found — DoH IP blocking inactive "
-            "(domain-level DoH sinkholing via /etc/hosts still active)"
-        )
-    except subprocess.CalledProcessError as e:
-        _apply_failed = True
-        log.warning(
-            "firewall: nft failed (%s) — DoH IP blocking inactive; "
-            "add AmbientCapabilities=CAP_NET_ADMIN to breaktimer-core.service to enable",
-            (e.stderr or "").strip() or str(e),
-        )
+        if self._rules_installed:
+            if _table_exists():
+                return  # rules still in place — nothing to do
+            log.warning(
+                "firewall: nftables table '%s' deleted externally — restoring DoH-blocking rules",
+                _TABLE,
+            )
+            self._rules_installed = False
 
+        try:
+            script = _build_script(self._doh_ips, self._doh_ips6)
+            _install_rules(script)
+            self._rules_installed = True
+            self._apply_failed = False
+            log.info(
+                "firewall: installed DoH-blocking rules (%d IPv4, %d IPv6 addresses, ports 443/853)",
+                len(self._doh_ips), len(self._doh_ips6),
+            )
+        except FileNotFoundError:
+            self._apply_failed = True
+            log.warning(
+                "firewall: nft not found — DoH IP blocking inactive "
+                "(domain-level DoH sinkholing via /etc/hosts still active)"
+            )
+        except subprocess.CalledProcessError as e:
+            self._apply_failed = True
+            log.warning(
+                "firewall: nft failed (%s) — DoH IP blocking inactive; "
+                "add AmbientCapabilities=CAP_NET_ADMIN to breaktimer-core.service to enable",
+                (e.stderr or "").strip() or str(e),
+            )
 
-def cleanup() -> None:
-    """Remove the breaktimer nftables table (call at process shutdown)."""
-    global _rules_installed
-    if not _rules_installed:
-        return
-    try:
-        subprocess.run(
-            ["nft", "delete", "table", "inet", _TABLE],
-            capture_output=True, text=True, check=True,
-        )
-        _rules_installed = False
-        log.info("firewall: removed nftables table '%s'", _TABLE)
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        log.warning("firewall: could not remove table '%s': %s", _TABLE, e)
+    def cleanup(self) -> None:
+        """Remove the breaktimer nftables table (call at process shutdown)."""
+        if not self._rules_installed:
+            return
+        try:
+            subprocess.run(
+                ["nft", "delete", "table", "inet", _TABLE],
+                capture_output=True, text=True, check=True,
+            )
+            self._rules_installed = False
+            log.info("firewall: removed nftables table '%s'", _TABLE)
+        except (FileNotFoundError, subprocess.CalledProcessError) as e:
+            log.warning("firewall: could not remove table '%s': %s", _TABLE, e)

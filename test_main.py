@@ -50,6 +50,12 @@ class StubMonitor:
         return self._healthy
 
 
+class _NoopBlocker:
+    """No-op stand-in for blocklist/app_blocker/firewall in tests."""
+    def apply(self, **kw): pass
+    def cleanup(self): pass
+
+
 def make_loop(remaining, max_seconds=3600, replenish_seconds=1200,
               daily_budget_seconds=8 * 3600, daily_limit_seconds=10 * 3600,
               today_total=None, save_fn=None):
@@ -57,7 +63,9 @@ def make_loop(remaining, max_seconds=3600, replenish_seconds=1200,
     if today_total is not None:
         state.daily_work_totals[main.today_str()] = today_total
     cfg = TimerConfig(max_seconds, replenish_seconds, daily_budget_seconds, daily_limit_seconds)
-    return TimerLoop(state, 0, StubMonitor(), cfg, save_fn=save_fn)
+    return TimerLoop(state, 0, StubMonitor(), cfg, save_fn=save_fn,
+                     blocklist=_NoopBlocker(), app_blocker=_NoopBlocker(),
+                     firewall=_NoopBlocker())
 
 
 class InTempDir(unittest.TestCase):
@@ -382,7 +390,9 @@ class TestRestartAfterShutdown(InTempDir):
         state.save(self._state_file)
         loaded = TimerState.load(self._state_file)
 
-        loop = TimerLoop(loaded, 0, StubMonitor(), TimerConfig(3600, 1200, 8 * 3600, 10 * 3600))
+        loop = TimerLoop(loaded, 0, StubMonitor(), TimerConfig(3600, 1200, 8 * 3600, 10 * 3600),
+                         blocklist=_NoopBlocker(), app_blocker=_NoopBlocker(),
+                         firewall=_NoopBlocker())
         loop.state.is_active = False
         loop._adjust_timer(1)
         with mock.patch.object(main, "execute_shutdown"):
