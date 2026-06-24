@@ -38,8 +38,7 @@ def _prune_daily_work_totals(totals):
     cutoff = (date.today() - timedelta(days=_HISTORY_DAYS)).isoformat()
     return {d: v for d, v in totals.items() if d >= cutoff}
 
-_XDG_STATE_HOME = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
-STATE_DIR = os.path.join(_XDG_STATE_HOME, "breaktimer")
+STATE_DIR = status.state_dir()
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 SAVE_INTERVAL_SECONDS = 10
 
@@ -573,14 +572,8 @@ def main():
         sys.exit(1)
 
     args = parse_arguments()
-    blocklist.blocklist_file          = os.path.join(STATE_DIR, "blocklist.txt")
-    blocklist.blocklist_active_file   = os.path.join(STATE_DIR, "blocklist-active.txt")
-    blocklist.blocklist_strict_file   = os.path.join(STATE_DIR, "blocklist-strict.txt")
-    blocklist.blocklist_schedule_file = os.path.join(STATE_DIR, "blocklist-schedule.txt")
-    app_blocking.app_blocklist_file          = os.path.join(STATE_DIR, "blocklist-apps.txt")
-    app_blocking.app_blocklist_active_file   = os.path.join(STATE_DIR, "blocklist-apps-active.txt")
-    app_blocking.app_blocklist_strict_file   = os.path.join(STATE_DIR, "blocklist-apps-strict.txt")
-    app_blocking.app_blocklist_schedule_file = os.path.join(STATE_DIR, "blocklist-apps-schedule.txt")
+    blocklist.init(STATE_DIR)
+    app_blocking.init(STATE_DIR)
     mana_max_seconds = args.deplete_minutes * SECONDS_PER_MINUTE
     mana_replenish_seconds = args.replenish_minutes * SECONDS_PER_MINUTE
 

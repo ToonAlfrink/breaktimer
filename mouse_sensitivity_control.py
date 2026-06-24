@@ -79,6 +79,8 @@ def read_original_sensitivity():
 
 
 def restore_sensitivity(originals):
+    if originals:
+        log.info("pointer speed restored: %s", originals)
     for path, value in originals.items():
         _write_speed_to_file(path, value)
 

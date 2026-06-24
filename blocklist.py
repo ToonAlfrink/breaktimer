@@ -61,11 +61,20 @@ HOSTS_PATH = "/etc/hosts"
 _BLOCK_BEGIN = "# BEGIN breaktimer-blocklist"
 _BLOCK_END = "# END breaktimer-blocklist"
 
-# Set by the core after it resolves STATE_DIR, so this module has no circular dep.
+# Tier file paths — set via init(state_dir) before the first apply() call.
 blocklist_file: str | None = None           # always-blocked tier
 blocklist_active_file: str | None = None    # work-session tier (blocked while timer active)
 blocklist_strict_file: str | None = None    # strict tier (blocked when daily refill is gone)
 blocklist_schedule_file: str | None = None  # schedule tier (blocked during time windows)
+
+
+def init(state_dir: str) -> None:
+    """Bind all tier file paths to state_dir. Must be called before apply()."""
+    global blocklist_file, blocklist_active_file, blocklist_strict_file, blocklist_schedule_file
+    blocklist_file          = os.path.join(state_dir, "blocklist.txt")
+    blocklist_active_file   = os.path.join(state_dir, "blocklist-active.txt")
+    blocklist_strict_file   = os.path.join(state_dir, "blocklist-strict.txt")
+    blocklist_schedule_file = os.path.join(state_dir, "blocklist-schedule.txt")
 
 # Well-known DoH providers — automatically added to the sinkhole whenever any
 # user-configured domains are blocked, so browsers cannot bypass /etc/hosts via

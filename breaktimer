@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import app_blocking
 import blocklist
 import brightness_control
-import main as _main
 import status
 
 
@@ -52,15 +51,8 @@ def cmd_brightness_on():
 
 
 def cmd_blocklist():
-    state_dir = _main.STATE_DIR
-    blocklist.blocklist_file          = os.path.join(state_dir, "blocklist.txt")
-    blocklist.blocklist_active_file   = os.path.join(state_dir, "blocklist-active.txt")
-    blocklist.blocklist_strict_file   = os.path.join(state_dir, "blocklist-strict.txt")
-    blocklist.blocklist_schedule_file = os.path.join(state_dir, "blocklist-schedule.txt")
-    app_blocking.app_blocklist_file          = os.path.join(state_dir, "blocklist-apps.txt")
-    app_blocking.app_blocklist_active_file   = os.path.join(state_dir, "blocklist-apps-active.txt")
-    app_blocking.app_blocklist_strict_file   = os.path.join(state_dir, "blocklist-apps-strict.txt")
-    app_blocking.app_blocklist_schedule_file = os.path.join(state_dir, "blocklist-apps-schedule.txt")
+    blocklist.init(status.state_dir())
+    app_blocking.init(status.state_dir())
 
     snap = status.Snapshot.read(max_age_seconds=10)
     is_active = snap.is_active if snap else False

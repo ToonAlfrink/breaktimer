@@ -86,6 +86,12 @@ class Snapshot:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
+def state_dir():
+    """Return the persistent state directory path ($XDG_STATE_HOME/breaktimer)."""
+    base = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+    return os.path.join(base, "breaktimer")
+
+
 def brightness_pause_path():
     return os.path.join(_runtime_dir(), "breaktimer-brightness-pause")
 

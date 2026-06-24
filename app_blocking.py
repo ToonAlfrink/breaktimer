@@ -31,11 +31,20 @@ import status
 
 log = logging.getLogger("breaktimer.apps")
 
-# Set by the core after it resolves STATE_DIR, so this module has no circular dep.
+# Tier file paths — set via init(state_dir) before the first apply() call.
 app_blocklist_file: str | None = None           # always-blocked tier
 app_blocklist_active_file: str | None = None    # work-session tier
 app_blocklist_strict_file: str | None = None    # strict tier
 app_blocklist_schedule_file: str | None = None  # schedule tier
+
+
+def init(state_dir: str) -> None:
+    """Bind all tier file paths to state_dir. Must be called before apply()."""
+    global app_blocklist_file, app_blocklist_active_file, app_blocklist_strict_file, app_blocklist_schedule_file
+    app_blocklist_file          = os.path.join(state_dir, "blocklist-apps.txt")
+    app_blocklist_active_file   = os.path.join(state_dir, "blocklist-apps-active.txt")
+    app_blocklist_strict_file   = os.path.join(state_dir, "blocklist-apps-strict.txt")
+    app_blocklist_schedule_file = os.path.join(state_dir, "blocklist-apps-schedule.txt")
 
 # Signal escalation: SIGTERM on first contact, SIGKILL if the process is still
 # alive after this many apply() calls.  At 1 Hz that equals 5 seconds.
