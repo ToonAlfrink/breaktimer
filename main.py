@@ -47,8 +47,6 @@ def _prune_daily_work_totals(totals):
     cutoff = (date.today() - timedelta(days=_HISTORY_DAYS)).isoformat()
     return {d: v for d, v in totals.items() if d >= cutoff}
 
-STATE_DIR = status.state_dir()
-STATE_FILE = os.path.join(STATE_DIR, "state.json")
 SAVE_INTERVAL_SECONDS = 10
 
 # (threshold_seconds, urgency, message) — fired once per descent through each level,
@@ -97,6 +95,38 @@ class TimerState:
             daily_work_totals=_prune_daily_work_totals(data.get("daily_work_totals", {})),
             last_saved_time=data.get("last_saved_time")
         )
+
+    @property
+    def offline_duration_seconds(self) -> float:
+        """Wall-clock seconds since the last save, or 0 if never saved."""
+        if not self.last_saved_time:
+            return 0.0
+        return max(0.0, time.time() - self.last_saved_time)
+
+    def save(self, path: str):
+        """Atomically persist to path (write temp → rename)."""
+        self.last_saved_time = time.time()
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            json.dump(self.to_dict(), f, indent=4)
+        os.replace(tmp, path)
+
+    @classmethod
+    def load(cls, path: str) -> "TimerState | None":
+        """Load from path, or None if missing, corrupt, or malformed."""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
+            log.warning("could not read state file (%s), starting fresh", e)
+            return None
+        if not isinstance(data, dict):
+            return None
+        return cls.from_dict(data)
 
 
 class ActivityMonitor:
@@ -169,35 +199,6 @@ class ActivityMonitor:
                 self._stop_event.wait(backoff)
                 backoff = min(backoff * 2, 60)
 
-
-def save_state_to_file(state):
-    """Saves state atomically (write temp, then rename) — this app powers the
-    machine off, so a save interrupted mid-write must not corrupt the file."""
-    state.last_saved_time = time.time()
-    state_to_save = state.to_dict()
-
-    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-    tmp_path = STATE_FILE + ".tmp"
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as f:
-        json.dump(state_to_save, f, indent=4)
-    os.replace(tmp_path, STATE_FILE)
-
-def load_state_from_file():
-    if not os.path.exists(STATE_FILE):
-        return None
-    try:
-        with open(STATE_FILE, 'r') as f:
-            data = json.load(f)
-        return TimerState.from_dict(data)
-    except (json.JSONDecodeError, ValueError, KeyError) as e:
-        log.warning("could not read state file (%s), starting fresh", e)
-        return None
-
-def compute_offline_duration_seconds(state):
-    if not state.last_saved_time:
-        return 0.0
-    return max(0.0, time.time() - state.last_saved_time)
 
 def execute_shutdown():
     # Call the logind D-Bus API directly (busctl) — most reliable from a user
@@ -279,17 +280,15 @@ class TimerLoop:
     MAX_TICK_SECONDS = SECONDS_PER_MINUTE
 
     def __init__(self, state, offline_duration_seconds, activity_monitor, config: TimerConfig,
-                 dispatch=run_effect_inline):
+                 dispatch=run_effect_inline, save_fn=None):
         self.state = state
         self.activity_monitor = activity_monitor
         # How blocking side effects leave the timer thread. Defaults to inline
         # (synchronous, deterministic); production injects EffectsWorker.submit
         # so a slow subprocess can't stall the heartbeat.
         self._dispatch = dispatch
-        self.mana_max_seconds = config.mana_max_seconds
-        self.mana_replenish_seconds = config.mana_replenish_seconds
-        self.daily_budget_seconds = config.daily_budget_seconds
-        self.daily_limit_seconds = config.daily_limit_seconds
+        self._config = config
+        self._save = save_fn or (lambda: None)
         # All in-process timing is monotonic so NTP steps / suspend can't warp it.
         self.last_loop_time = time.monotonic() - offline_duration_seconds
         self.last_save_time = time.monotonic()
@@ -304,8 +303,8 @@ class TimerLoop:
             if self.state.remaining_time <= threshold
         }
         today_total = self.state.daily_work_totals.get(today_str(), 0)
-        for name, threshold in (("budget", self.daily_budget_seconds),
-                                ("limit", self.daily_limit_seconds)):
+        for name, threshold in (("budget", self._config.daily_budget_seconds),
+                                ("limit", self._config.daily_limit_seconds)):
             if today_total >= threshold:
                 self._notified.add(f"daily-{name}-{today_str()}")
     
@@ -357,10 +356,10 @@ class TimerLoop:
         at the daily limit. Past the limit breaks no longer refill, so the bar
         is finite and the day ends when it drains."""
         today_total = self.state.daily_work_totals.get(today_str(), 0)
-        if today_total <= self.daily_budget_seconds:
+        if today_total <= self._config.daily_budget_seconds:
             return 1.0
-        span = self.daily_limit_seconds - self.daily_budget_seconds
-        return max(0.0, 1.0 - (today_total - self.daily_budget_seconds) / span)
+        span = self._config.daily_limit_seconds - self._config.daily_budget_seconds
+        return max(0.0, 1.0 - (today_total - self._config.daily_budget_seconds) / span)
 
     def _adjust_timer(self, time_since_last_loop):
         today = today_str()
@@ -369,9 +368,9 @@ class TimerLoop:
             current_day_total = self.state.daily_work_totals.get(today, 0)
             self.state.daily_work_totals[today] = current_day_total + time_since_last_loop
         else:
-            rate = (self.mana_max_seconds / self.mana_replenish_seconds) * self._refill_multiplier()
+            rate = (self._config.mana_max_seconds / self._config.mana_replenish_seconds) * self._refill_multiplier()
             self.state.remaining_time += time_since_last_loop * rate
-            self.state.remaining_time = min(self.state.remaining_time, self.mana_max_seconds)
+            self.state.remaining_time = min(self.state.remaining_time, self._config.mana_max_seconds)
     
     def _check_shutdown(self):
         if self.state.remaining_time <= 0:
@@ -393,7 +392,7 @@ class TimerLoop:
                     _fmt_hours(self.state.daily_work_totals.get(today_str(), 0)),
                     self._refill_multiplier() * 100,
                 )
-                save_state_to_file(self.state)
+                self._save()
                 execute_shutdown()
                 return True
         else:
@@ -454,10 +453,10 @@ class TimerLoop:
         today = today_str()
         today_total = self.state.daily_work_totals.get(today, 0)
         for name, threshold, urgency, msg in (
-            ("budget", self.daily_budget_seconds, "normal",
-             f"{_fmt_hours(self.daily_budget_seconds)} worked today — breaks now refill slower"),
-            ("limit", self.daily_limit_seconds, "critical",
-             f"{_fmt_hours(self.daily_limit_seconds)} worked today — no refill left, "
+            ("budget", self._config.daily_budget_seconds, "normal",
+             f"{_fmt_hours(self._config.daily_budget_seconds)} worked today — breaks now refill slower"),
+            ("limit", self._config.daily_limit_seconds, "critical",
+             f"{_fmt_hours(self._config.daily_limit_seconds)} worked today — no refill left, "
              "shutdown when the bar empties"),
         ):
             key = f"daily-{name}-{today}"
@@ -470,7 +469,7 @@ class TimerLoop:
         """Publish the live snapshot for ambient surfaces (see status.Snapshot)."""
         snapshot = status.Snapshot(
             remaining_seconds=self.state.remaining_time,
-            max_seconds=self.mana_max_seconds,
+            max_seconds=self._config.mana_max_seconds,
             is_active=self.state.is_active,
             grace_remaining=self._grace_remaining(),
             refill_rate=self._refill_multiplier(),
@@ -501,14 +500,14 @@ class TimerLoop:
         if self._check_shutdown():
             return True
 
-        remaining_fraction = self.state.remaining_time / self.mana_max_seconds
+        remaining_fraction = self.state.remaining_time / self._config.mana_max_seconds
         self._apply_blocking()
         self._apply_hardware_adjustments(remaining_fraction, current_loop_time)
         self._check_notifications()
         self._write_status()
 
         if current_loop_time - self.last_save_time >= SAVE_INTERVAL_SECONDS:
-            save_state_to_file(self.state)
+            self._save()
             self.last_save_time = current_loop_time
 
         self.last_loop_time = current_loop_time
@@ -560,9 +559,9 @@ def parse_arguments():
         parser.error("--daily-budget-minutes must be positive and below --daily-limit-minutes")
     return args
 
-def initialize_state(args, mana_max_seconds):
+def initialize_state(args, mana_max_seconds, state_file):
     """Load saved state (or start full), clamping remaining time to the bar cap."""
-    state = load_state_from_file() or TimerState(remaining_time=mana_max_seconds)
+    state = TimerState.load(state_file) or TimerState(remaining_time=mana_max_seconds)
     if args.start_minutes is not None:
         state.remaining_time = args.start_minutes * SECONDS_PER_MINUTE
     state.remaining_time = min(state.remaining_time, mana_max_seconds)
@@ -572,14 +571,17 @@ def main():
     # journald already stamps time and unit, so keep the line lean.
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    state_dir = status.state_dir()
+    state_file = os.path.join(state_dir, "state.json")
+
     lock = status.acquire_singleton_lock("core")
     if lock is None:
         log.error("breaktimer core already running — exiting")
         sys.exit(1)
 
     args = parse_arguments()
-    blocklist.init(STATE_DIR)
-    app_blocking.init(STATE_DIR)
+    blocklist.init(state_dir)
+    app_blocking.init(state_dir)
     cfg = TimerConfig(
         mana_max_seconds=args.deplete_minutes * SECONDS_PER_MINUTE,
         mana_replenish_seconds=args.replenish_minutes * SECONDS_PER_MINUTE,
@@ -587,7 +589,7 @@ def main():
         daily_limit_seconds=args.daily_limit_minutes * SECONDS_PER_MINUTE,
     )
 
-    state = initialize_state(args, cfg.mana_max_seconds)
+    state = initialize_state(args, cfg.mana_max_seconds, state_file)
 
     activity_monitor = ActivityMonitor()
     activity_monitor.start()
@@ -599,7 +601,7 @@ def main():
 
     # Offline duration is wall-clock (it spans a process/boot gap); fold it into
     # the monotonic activity baseline so the first tick reads as idle downtime.
-    offline_duration_seconds = compute_offline_duration_seconds(state)
+    offline_duration_seconds = state.offline_duration_seconds
     activity_monitor.set_last_activity_time(time.monotonic() - offline_duration_seconds)
 
     try:
@@ -609,11 +611,12 @@ def main():
             activity_monitor,
             cfg,
             dispatch=effects.submit,
+            save_fn=lambda: state.save(state_file),
         )
         timer_loop.run()
 
     except KeyboardInterrupt:
-        save_state_to_file(state)
+        state.save(state_file)
     finally:
         activity_monitor.stop()
         restore_sensitivity(original_sensitivity)

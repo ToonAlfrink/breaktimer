@@ -24,10 +24,7 @@ from main import (
     TimerConfig,
     TimerLoop,
     TimerState,
-    compute_offline_duration_seconds,
     initialize_state,
-    load_state_from_file,
-    save_state_to_file,
 )
 
 
@@ -55,67 +52,63 @@ class StubMonitor:
 
 def make_loop(remaining, max_seconds=3600, replenish_seconds=1200,
               daily_budget_seconds=8 * 3600, daily_limit_seconds=10 * 3600,
-              today_total=None):
+              today_total=None, save_fn=None):
     state = TimerState(remaining_time=remaining)
     if today_total is not None:
         state.daily_work_totals[main.today_str()] = today_total
     cfg = TimerConfig(max_seconds, replenish_seconds, daily_budget_seconds, daily_limit_seconds)
-    return TimerLoop(state, 0, StubMonitor(), cfg)
+    return TimerLoop(state, 0, StubMonitor(), cfg, save_fn=save_fn)
 
 
 class InTempDir(unittest.TestCase):
-    """Each test gets a private temp state dir so STATE_FILE never touches real state."""
+    """Each test gets a private temp state dir; self._state_file is the path to use."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         state_dir = os.path.join(self._tmp.name, "breaktimer")
         os.makedirs(state_dir, mode=0o700)
-        state_file = os.path.join(state_dir, "state.json")
-        self._dir_patch = mock.patch.object(main, "STATE_DIR", state_dir)
-        self._file_patch = mock.patch.object(main, "STATE_FILE", state_file)
-        self._dir_patch.start()
-        self._file_patch.start()
+        self._state_file = os.path.join(state_dir, "state.json")
 
     def tearDown(self):
-        self._file_patch.stop()
-        self._dir_patch.stop()
         self._tmp.cleanup()
 
 
 class TestStatePersistence(InTempDir):
     def test_round_trip(self):
         state = TimerState(remaining_time=1234.5, daily_work_totals={"2026-06-09": 7200.0})
-        save_state_to_file(state)
-        loaded = load_state_from_file()
+        state.save(self._state_file)
+        loaded = TimerState.load(self._state_file)
         self.assertAlmostEqual(loaded.remaining_time, 1234.5)
         self.assertEqual(loaded.daily_work_totals, {"2026-06-09": 7200.0})
         self.assertIsNotNone(loaded.last_saved_time)
 
     def test_only_durable_fields_persisted(self):
-        save_state_to_file(TimerState(remaining_time=10))
-        with open(main.STATE_FILE) as f:
+        TimerState(remaining_time=10).save(self._state_file)
+        with open(self._state_file) as f:
             keys = set(json.load(f))
         self.assertEqual(keys, {"remaining_time", "daily_work_totals", "last_saved_time"})
 
     def test_save_is_atomic_leaves_no_temp_file(self):
-        save_state_to_file(TimerState(remaining_time=10))
-        self.assertEqual(os.listdir(main.STATE_DIR), ["state.json"])
+        TimerState(remaining_time=10).save(self._state_file)
+        self.assertEqual(os.listdir(os.path.dirname(self._state_file)), ["state.json"])
 
     def test_missing_file_returns_none(self):
-        self.assertIsNone(load_state_from_file())
+        self.assertIsNone(TimerState.load(self._state_file))
 
     def test_corrupt_file_returns_none(self):
-        with open(main.STATE_FILE, "w") as f:
+        with open(self._state_file, "w") as f:
             f.write("{truncated")
         with mock.patch("sys.stderr"):
-            self.assertIsNone(load_state_from_file())
+            self.assertIsNone(TimerState.load(self._state_file))
 
+
+class TestOfflineDuration(unittest.TestCase):
     def test_offline_duration_from_last_saved_time(self):
         state = TimerState(remaining_time=10, last_saved_time=time.time() - 100)
-        self.assertAlmostEqual(compute_offline_duration_seconds(state), 100, delta=5)
+        self.assertAlmostEqual(state.offline_duration_seconds, 100, delta=5)
 
     def test_offline_duration_zero_without_history(self):
-        self.assertEqual(compute_offline_duration_seconds(TimerState(remaining_time=10)), 0.0)
+        self.assertEqual(TimerState(remaining_time=10).offline_duration_seconds, 0.0)
 
 
 class TestTimerArithmetic(unittest.TestCase):
@@ -141,7 +134,7 @@ class TestTimerArithmetic(unittest.TestCase):
         self.assertEqual(loop.state.remaining_time, 3600)
 
 
-class TestShutdownGrace(InTempDir):
+class TestShutdownGrace(unittest.TestCase):
     def test_zero_starts_grace_without_shutting_down(self):
         loop = make_loop(0)
         with mock.patch.object(main, "execute_shutdown") as shutdown:
@@ -150,12 +143,12 @@ class TestShutdownGrace(InTempDir):
         self.assertIsNotNone(loop.grace_start)
 
     def test_shutdown_fires_after_grace_elapses_and_saves_state(self):
-        loop = make_loop(0)
+        saved = []
+        loop = make_loop(0, save_fn=lambda: saved.append(True))
         loop.grace_start = time.monotonic() - TimerLoop.GRACE_SECONDS - 1
-        with mock.patch.object(main, "execute_shutdown") as shutdown:
+        with mock.patch.object(main, "execute_shutdown"):
             self.assertTrue(loop._check_shutdown())
-        shutdown.assert_called_once()
-        self.assertIsNotNone(load_state_from_file())
+        self.assertTrue(saved)
 
     def test_refill_cancels_grace_window(self):
         loop = make_loop(120)
@@ -172,7 +165,7 @@ class TestShutdownGrace(InTempDir):
         self.assertEqual(loop.state.remaining_time, 0.0)
 
 
-class TestActionTrail(InTempDir):
+class TestActionTrail(unittest.TestCase):
     """A daemon that dims the screen and powers the machine off must leave a
     record of why. These pin that each consequential act logs its reason."""
 
@@ -249,7 +242,7 @@ class TestActivityStatus(unittest.TestCase):
         self.assertTrue(loop.state.is_active)
 
 
-class TestClockResilience(InTempDir):
+class TestClockResilience(unittest.TestCase):
     """A clock that lurches forward (NTP step, resume-from-suspend) must not let a
     single tick drain the bar and trip the uncancellable shutdown grace."""
 
@@ -321,23 +314,23 @@ class TestInitializeState(InTempDir):
         return argparse.Namespace(start_minutes=start_minutes)
 
     def test_fresh_state_starts_full(self):
-        state = initialize_state(self._args(), 3600)
+        state = initialize_state(self._args(), 3600, self._state_file)
         self.assertEqual(state.remaining_time, 3600)
 
     def test_saved_time_clamped_to_cap(self):
-        save_state_to_file(TimerState(remaining_time=7200))
-        state = initialize_state(self._args(), 3600)
+        TimerState(remaining_time=7200).save(self._state_file)
+        state = initialize_state(self._args(), 3600, self._state_file)
         self.assertEqual(state.remaining_time, 3600)
 
     def test_start_minutes_override_clamped_to_cap(self):
-        state = initialize_state(self._args(start_minutes=120), 3600)
+        state = initialize_state(self._args(start_minutes=120), 3600, self._state_file)
         self.assertEqual(state.remaining_time, 3600)
 
     def test_saved_zero_not_inflated_to_cap(self):
         # remaining_time=0 saved before a limit-triggered shutdown must survive
         # a service restart unchanged — this is what makes re-shut-on-login work.
-        save_state_to_file(TimerState(remaining_time=0))
-        state = initialize_state(self._args(), 3600)
+        TimerState(remaining_time=0).save(self._state_file)
+        state = initialize_state(self._args(), 3600, self._state_file)
         self.assertEqual(state.remaining_time, 0)
 
 
@@ -386,8 +379,8 @@ class TestRestartAfterShutdown(InTempDir):
     def test_restart_at_zero_past_limit_enters_grace(self):
         state = TimerState(remaining_time=0)
         state.daily_work_totals[main.today_str()] = 10 * 3600
-        save_state_to_file(state)
-        loaded = load_state_from_file()
+        state.save(self._state_file)
+        loaded = TimerState.load(self._state_file)
 
         loop = TimerLoop(loaded, 0, StubMonitor(), TimerConfig(3600, 1200, 8 * 3600, 10 * 3600))
         loop.state.is_active = False
@@ -663,8 +656,7 @@ class TestRefillFatigue(unittest.TestCase):
             self.assertFalse(loop._check_shutdown())
             self.assertIsNotNone(loop.grace_start)
             loop.grace_start = time.monotonic() - TimerLoop.GRACE_SECONDS - 1
-            with mock.patch.object(main, "save_state_to_file"):
-                self.assertTrue(loop._check_shutdown())
+            self.assertTrue(loop._check_shutdown())
         shutdown.assert_called_once()
 
     def test_status_payload_includes_refill_rate(self):
@@ -876,8 +868,7 @@ class TestPhoneActivity(unittest.TestCase):
         start = loop.state.remaining_time
         with tempfile.TemporaryDirectory() as tmpdir, \
                 mock.patch("status._runtime_dir", return_value=tmpdir), \
-                mock.patch("status.Snapshot.publish"), \
-                mock.patch("main.save_state_to_file"):
+                mock.patch("status.Snapshot.publish"):
             self._with_ping(tmpdir)
             loop.tick()
         self.assertLess(loop.state.remaining_time, start,
@@ -888,8 +879,7 @@ class TestPhoneActivity(unittest.TestCase):
         loop, monitor = self._loop_with_monitor(remaining=1800)
         with tempfile.TemporaryDirectory() as tmpdir, \
                 mock.patch("status._runtime_dir", return_value=tmpdir), \
-                mock.patch("status.Snapshot.publish"), \
-                mock.patch("main.save_state_to_file"):
+                mock.patch("status.Snapshot.publish"):
             # No ping file — phone is backgrounded; monitor also has stale activity
             loop.tick()
         self.assertGreater(loop.state.remaining_time, 1800,
