@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 import status
+import sync_state
 from status import SECONDS_PER_MINUTE, today_str
 import app_blocking
 import blocklist
@@ -288,6 +289,7 @@ class TimerLoop:
         # All in-process timing is monotonic so NTP steps / suspend can't warp it.
         self.last_loop_time = time.monotonic() - offline_duration_seconds
         self.last_save_time = time.monotonic()
+        self.last_sync_time = time.monotonic()
         self.last_adjustment_time = time.monotonic()
         self.grace_start = None
         self._status_write_warned = False
@@ -318,6 +320,50 @@ class TimerLoop:
         last_ping = status.read_phone_ping()
         if last_ping is not None and time.time() - last_ping < status.PHONE_PING_MAX_AGE_SECONDS:
             self.activity_monitor.set_last_activity_time(time.monotonic())
+
+    def _sync_state(self, sync_time):
+        """Check and push sync state via the shared folder.
+
+        Loads remote state if newer, pushes local state otherwise.
+        Uses last-write-wins for conflict resolution."""
+        remote = sync_state.load_synced_state()
+        if remote is None:
+            # No remote — push local
+            self._push_sync_state()
+            return
+
+        # Build local SyncState
+        local = sync_state.SyncState(
+            remaining_time=self.state.remaining_time,
+            daily_work_totals=self.state.daily_work_totals,
+            is_active=self.state.is_active,
+            last_activity_time=self.activity_monitor.get_last_activity_time(),
+            last_saved_time=time.time()
+        )
+
+        # Merge with last-write-wins
+        merged = sync_state.merge_states(local, remote)
+
+        # Apply merged state if remote won
+        if merged.last_saved_time > local.last_saved_time:
+            self.state.remaining_time = merged.remaining_time
+            self.state.daily_work_totals = merged.daily_work_totals
+            self.state.is_active = merged.is_active
+            self.activity_monitor.set_last_activity_time(merged.last_activity_time)
+
+        # Push latest state
+        self._push_sync_state()
+
+    def _push_sync_state(self):
+        """Push current state to the sync folder."""
+        state = sync_state.SyncState(
+            remaining_time=self.state.remaining_time,
+            daily_work_totals=self.state.daily_work_totals,
+            is_active=self.state.is_active,
+            last_activity_time=self.activity_monitor.get_last_activity_time(),
+            last_saved_time=time.time()
+        )
+        sync_state.save_synced_state(state)
 
     def _update_activity_status(self, current_loop_time, time_since_last_loop):
         if not self.activity_monitor.is_healthy():
@@ -502,6 +548,10 @@ class TimerLoop:
         self._apply_hardware_adjustments(remaining_fraction, current_loop_time)
         self._check_notifications()
         self._write_status()
+
+        if current_loop_time - self.last_sync_time >= sync_state.SYNC_INTERVAL_SECONDS:
+            self._sync_state(current_loop_time)
+            self.last_sync_time = current_loop_time
 
         if current_loop_time - self.last_save_time >= SAVE_INTERVAL_SECONDS:
             self._save()
